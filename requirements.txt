@@ -1,0 +1,19 @@
+# Simulation
+pybullet          # on Windows, installed from conda-forge by setup_windows.bat
+numpy
+scipy
+pyzmq
+pyyaml
+pathfinding
+gymnasium
+matplotlib
+pandas
+# Causal analysis
+torch
+networkx
+statsmodels
+scikit-learn
+# Tests
+pytest
+# gym-pybullet-drones is not on PyPI:
+#   pip install --no-deps https://github.com/utiasDSL/gym-pybullet-drones/archive/refs/heads/main.zip
