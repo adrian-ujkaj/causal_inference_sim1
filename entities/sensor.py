@@ -1,10 +1,11 @@
-import math
 import numpy as np
-import pybullet as p
+
+from utilities import quaternion as Q
 
 
 class Sensor:
-    """Classe de base pour les capteurs."""
+    """Base class for sensors."""
+
     def __init__(self):
         pass
 
@@ -13,204 +14,196 @@ class Sensor:
 
 
 class GNSSensor(Sensor):
-    """
-    Capteur GPS simple :
-    - position_noise_std : écart-type du bruit sur la position (m)
-    - velocity_noise_std : écart-type du bruit sur la vitesse (m/s)
+    """Simulated GNSS: noisy position [m] and velocity [m/s], jamming (jam_*) and outages (outages).
+    last_pos_std / last_vel_std give the applied standard deviation, like the hAcc / sAcc of a u-blox receiver.
     """
 
     def __init__(self, config: dict):
         super().__init__()
+        config = dict(config or {})
 
-        self.pos_noise_std = float(config.get("position_noise_std", 0.0))
-        self.vel_noise_std = float(config.get("velocity_noise_std", 0.0))
+        self.pos_noise_std = max(0.0, float(config.get("position_noise_std", 0.0)))
+        self.vel_noise_std = max(0.0, float(config.get("velocity_noise_std", 0.0)))
+        self.pos_noise_std_base = self.pos_noise_std
+        self.vel_noise_std_base = self.vel_noise_std
 
-        if self.pos_noise_std < 0.0:
-            self.pos_noise_std = 0.0
-        if self.vel_noise_std < 0.0:
-            self.vel_noise_std = 0.0
+        # Jamming
+        self.jam_start = config.get("jam_start", None)
+        self.jam_end = config.get("jam_end", None)
+        self.jam_pos_noise_std = config.get("jam_position_noise_std", config.get("jam_pos_noise_std", None))
+        self.jam_vel_noise_std = config.get("jam_velocity_noise_std", config.get("jam_vel_noise_std", None))
+        self.jam_multiplier = float(config.get("jam_multiplier", 1.0))
+
+        # Outages
+        windows = list(config.get("outages", []) or [])
+        if config.get("outage_start") is not None and config.get("outage_end") is not None:
+            windows.append([config["outage_start"], config["outage_end"]])
+        self.outages = [(float(a), float(b)) for a, b in windows]
+
+        seed = config.get("seed", None)
+        self._rng = None if seed is None else np.random.default_rng(int(seed))
+
+        self.last_pos_std = self.pos_noise_std
+        self.last_vel_std = self.vel_noise_std
+        self.available = True
+
+    def is_available(self, t: float | None) -> bool:
+        """False during an outage window."""
+        if t is None:
+            return True
+        return not any(a <= float(t) <= b for a, b in self.outages)
+
+    def _normal(self, std: float) -> np.ndarray:
+        if self._rng is not None:
+            return self._rng.normal(0.0, std, 3)
+        return np.random.normal(0.0, std, 3)
 
     def measure(
         self,
         ground_truth_position: np.ndarray,
         ground_truth_velocity: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """
-        Renvoie (position_mesurée, vitesse_mesurée) avec bruit gaussien.
-        """
-        pos_noise = np.random.normal(0.0, self.pos_noise_std, 3)
-        vel_noise = np.random.normal(0.0, self.vel_noise_std, 3)
+        t: float | None = None,
+    ):
+        """Returns noisy (position, velocity), or (None, None) during an outage."""
+        self.available = self.is_available(t)
+        if not self.available:
+            return None, None
 
-        meas_pos = ground_truth_position + pos_noise
-        meas_vel = ground_truth_velocity + vel_noise
+        pos_std = self.pos_noise_std
+        vel_std = self.vel_noise_std
 
+        if (t is not None) and (self.jam_start is not None) and (self.jam_end is not None):
+            if float(self.jam_start) <= float(t) <= float(self.jam_end):
+                if self.jam_pos_noise_std is not None:
+                    pos_std = float(self.jam_pos_noise_std)
+                else:
+                    pos_std = float(self.pos_noise_std_base) * float(self.jam_multiplier)
+                if self.jam_vel_noise_std is not None:
+                    vel_std = float(self.jam_vel_noise_std)
+                else:
+                    vel_std = float(self.vel_noise_std_base) * float(self.jam_multiplier)
+
+        self.last_pos_std = pos_std
+        self.last_vel_std = vel_std
+
+        meas_pos = np.asarray(ground_truth_position, dtype=float) + self._normal(pos_std)
+        meas_vel = np.asarray(ground_truth_velocity, dtype=float) + self._normal(vel_std)
         return meas_pos, meas_vel
 
 
-# Dans entities/sensor.py
+class IMUSensor(Sensor):
+    """Simulated MEMS IMU, in the body frame: measurement = (1 + s) * true + bias (constant + random walk) + noise.
+    Values averaged over [k-1, k]: gyro = Log(q(k-1)^-1 (x) q(k)) / dt, accel projected at mid-interval.
+    accel_error_det, gyro_error_det and q_mid give the ground truth of the errors for the NEES.
+    """
 
-class IMUSensor:
-    def __init__(self, config_dict=None):
-        self.last_vel = np.zeros(3)
-        self.dt = 1/100 # Supposé
-        self.g_vector = np.array([0, 0, 9.81])
+    def __init__(self, config: dict | None = None, dt: float | None = None):
+        super().__init__()
+        cfg = dict(config or {})
 
-    def measure(self, vel, orn_q):
-        """
-        Simule un accéléromètre + gyroscope
-        Retourne : acc_body, gyro_body
-        """
-        # 1. Calcul Accélération Monde (a = dv/dt)
-        # (C'est une approximation discrete)
-        acc_world = (np.array(vel) - self.last_vel) / self.dt
-        self.last_vel = np.array(vel)
-        
-        # 2. Ajout de la "pesanteur ressentie" (Proper Acceleration)
-        # Un accéléromètre mesure (a - g). Comme g pointe vers le bas (-9.81), 
-        # a_mesure = a_monde - (-9.81) = a_monde + 9.81
+        dt_cfg = cfg.get("dt", dt)
+        if dt_cfg is None or float(dt_cfg) <= 0.0:
+            dt_cfg = 1.0 / 100.0
+        self.dt_nominal = float(dt_cfg)
+
+        g = float(cfg.get("gravity", 9.81))
+        self.g_vector = np.array([0.0, 0.0, g], dtype=float)
+
+        # Dedicated generator, reproducible draws in Monte-Carlo
+        seed = cfg.get("seed", None)
+        self._rng = np.random.default_rng(None if seed is None else int(seed))
+
+        # Accelerometer: noise [m/s^2], density [m/s^2/sqrt(Hz)], random walk [m/s^2/sqrt(s)]
+        self.accel_noise_std = max(0.0, float(cfg.get("accel_noise_std", 0.0)))
+        self.accel_noise_density = cfg.get("accel_noise_density", None)
+        self.accel_noise_mean = float(cfg.get("accel_noise_mean", 0.0))
+        self.accel_bias_rw = max(0.0, float(cfg.get("accel_bias_rw", 0.0)))
+        accel_bias_std = max(0.0, float(cfg.get("accel_bias_std", 0.0)))
+        accel_scale_std = max(0.0, float(cfg.get("accel_scale_std", 0.0)))
+
+        # Gyroscope: same quantities in rad/s
+        self.gyro_noise_std = max(0.0, float(cfg.get("gyro_noise_std", 0.0)))
+        self.gyro_noise_density = cfg.get("gyro_noise_density", None)
+        self.gyro_bias_rw = max(0.0, float(cfg.get("gyro_bias_rw", 0.0)))
+        gyro_bias_std = max(0.0, float(cfg.get("gyro_bias_std", 0.0)))
+        gyro_scale_std = max(0.0, float(cfg.get("gyro_scale_std", 0.0)))
+
+        # Drawn once per sensor (turn-on bias)
+        self.accel_bias = self._rng.normal(0.0, accel_bias_std, 3) if accel_bias_std > 0 else np.zeros(3)
+        self.gyro_bias = self._rng.normal(0.0, gyro_bias_std, 3) if gyro_bias_std > 0 else np.zeros(3)
+        self.accel_scale = self._rng.normal(0.0, accel_scale_std, 3) if accel_scale_std > 0 else np.zeros(3)
+        self.gyro_scale = self._rng.normal(0.0, gyro_scale_std, 3) if gyro_scale_std > 0 else np.zeros(3)
+
+        self.accel_bias_0 = self.accel_bias.copy()
+        self.gyro_bias_0 = self.gyro_bias.copy()
+
+        self.last_vel = None  # None on the first call: acceleration assumed zero
+        self.last_q = None
+
+        # Ground truth of the errors
+        self.accel_error_det = self.accel_bias + self.accel_noise_mean
+        self.gyro_error_det = self.gyro_bias.copy()
+        self.q_mid = np.array([0.0, 0.0, 0.0, 1.0])
+        self.last_acc_body_true = np.zeros(3)
+        self.last_gyro_body_true = np.zeros(3)
+
+    def reset(self, vel: np.ndarray | None = None, orn_q=None) -> None:
+        """Reset the differentiation (between two Monte-Carlo runs)."""
+        self.last_vel = None if vel is None else np.asarray(vel, dtype=float).copy()
+        self.last_q = None if orn_q is None else Q.normalize(orn_q)
+
+    def _white_std(self, std: float, density, dt: float) -> float:
+        if density is not None:
+            d = float(density)
+            if d > 0.0 and dt > 0.0:
+                return d / np.sqrt(dt)
+            return 0.0
+        return std
+
+    def measure(self, vel, orn_q, ang_vel=None, dt: float | None = None):
+        """Returns (acc_body, gyro_body); vel in the world frame [m/s], orn_q body -> world, ang_vel ignored."""
+        step = self.dt_nominal if (dt is None or float(dt) <= 0.0) else float(dt)
+
+        vel = np.asarray(vel, dtype=float).reshape(3)
+        q_k = Q.normalize(orn_q)
+        q_prev = q_k if self.last_q is None else self.last_q
+
+        if self.last_vel is None:
+            acc_world = np.zeros(3)
+        else:
+            acc_world = (vel - self.last_vel) / step
+        self.last_vel = vel.copy()
+        self.last_q = q_k
+
+        # Specific force f = a - g_vec, with g_vec = [0, 0, -g]
         acc_proper_world = acc_world + self.g_vector
-        
-        # 3. Rotation vers Body Frame (Monde -> Drone)
-        # On utilise la matrice inverse de rotation
-        R_world_to_body = np.array(p.getMatrixFromQuaternion(orn_q)).reshape(3,3).T
-        acc_body = R_world_to_body @ acc_proper_world
-        
-        # Ajout de bruit (facultatif)
-        acc_body += np.random.normal(0, 0.1, 3) # Bruit blanc
-        
-        # Gyro (Vitesse angulaire, ici on met 0 ou la vraie pour simplifier)
-        gyro_body = np.zeros(3) 
-        
+
+        # World -> body projection at mid-interval, like the ESKF mechanisation
+        self.q_mid = Q.slerp(q_prev, q_k, 0.5)
+        acc_body_true = Q.to_rot(self.q_mid).T @ acc_proper_world
+
+        # Mean angular velocity that exactly reproduces the rotation over the interval
+        gyro_body_true = Q.log(Q.mul(Q.conj(q_prev), q_k)) / step
+
+        self.last_acc_body_true = acc_body_true
+        self.last_gyro_body_true = gyro_body_true
+
+        if self.accel_bias_rw > 0.0:
+            self.accel_bias = self.accel_bias + self._rng.normal(0.0, self.accel_bias_rw * np.sqrt(step), 3)
+        if self.gyro_bias_rw > 0.0:
+            self.gyro_bias = self.gyro_bias + self._rng.normal(0.0, self.gyro_bias_rw * np.sqrt(step), 3)
+
+        self.accel_error_det = self.accel_scale * acc_body_true + self.accel_bias + self.accel_noise_mean
+        self.gyro_error_det = self.gyro_scale * gyro_body_true + self.gyro_bias
+
+        a_std = self._white_std(self.accel_noise_std, self.accel_noise_density, step)
+        acc_body = acc_body_true + self.accel_error_det
+        if a_std > 0.0:
+            acc_body = acc_body + self._rng.normal(0.0, a_std, 3)
+
+        g_std = self._white_std(self.gyro_noise_std, self.gyro_noise_density, step)
+        gyro_body = gyro_body_true + self.gyro_error_det
+        if g_std > 0.0:
+            gyro_body = gyro_body + self._rng.normal(0.0, g_std, 3)
+
         return acc_body, gyro_body
-
-class LidarSensor:
-    def __init__(self, config: dict):
-        """
-        Lidar paramétrable avec un champ de vision (FOV) conique.
-        """
-        self.max_distance = float(config.get("max_distance", 5.0))
-        self.angle_resolution = float(config.get("angle_resolution", 2.0))
-        
-        # FOV en degrés, convertis en demi-angles
-        fov_h = float(config.get("fov_horizontal", 90.0))
-        fov_v = float(config.get("fov_vertical", 30.0))
-        
-        self.half_fov_h = fov_h / 2.0
-        self.half_fov_v = fov_v / 2.0
-        
-        # Pré-génération des vecteurs de rayons dans le repère LOCAL du drone
-        # Axe X = Devant, Y = Gauche, Z = Haut
-        self.local_rays = self._generate_local_rays()
-        print(f"[LidarSensor] Initialisé : {len(self.local_rays)} rayons (FOV H:{fov_h}°, V:{fov_v}°)")
-
-    def _generate_local_rays(self):
-        rays = []
-        # On balaie de gauche à droite (-fov_h/2 à +fov_h/2)
-        for az in np.arange(-self.half_fov_h, self.half_fov_h, self.angle_resolution):
-            # On balaie de bas en haut (-fov_v/2 à +fov_v/2)
-            for el in np.arange(-self.half_fov_v, self.half_fov_v, self.angle_resolution):
-                
-                # Conversion degrés -> radians
-                az_rad = np.deg2rad(az)
-                el_rad = np.deg2rad(el)
-                
-                # Coordonnées sphériques vers Cartésiennes (X est devant)
-                # x = cos(el) * cos(az)
-                # y = cos(el) * sin(az)
-                # z = sin(el)
-                x = np.cos(el_rad) * np.cos(az_rad)
-                y = np.cos(el_rad) * np.sin(az_rad)
-                z = np.sin(el_rad)
-                
-                # Normalisation (juste par sécurité)
-                v = np.array([x, y, z])
-                v = v / np.linalg.norm(v)
-                rays.append(v)
-        
-        return np.array(rays)
-
-    def measure(self, position, roll, yaw, pitch):
-        """
-        Effectue un raycast par lot (batch) dans PyBullet.
-        Args:
-            position: [x, y, z] du drone
-            roll, yaw, pitch: orientation actuelle en radians
-        Returns:
-            points: Liste de np.array [x, y, z] des impacts détectés
-        """
-        # 1. Calcul de la matrice de rotation du drone
-        # PyBullet utilise l'ordre [roll, pitch, yaw] pour les quaternions Euler
-        orn_q = p.getQuaternionFromEuler([roll, pitch, yaw])
-        rot_matrix = p.getMatrixFromQuaternion(orn_q)
-        
-        # Transformation de la matrice plate (9,) en (3,3)
-        R = np.array(rot_matrix).reshape(3, 3)
-        
-        # 2. Rotation de tous les rayons locaux vers le monde
-        # Formule: Ray_Monde = R * Ray_Local
-        # Optimisation vectorielle : (N,3) dot (3,3) -> (N,3)
-        # Note: on utilise transpose pour aligner les dimensions correctement
-        world_rays_dir = self.local_rays @ R.T 
-        
-        # 3. Préparation des positions de départ et d'arrivée
-        num_rays = len(world_rays_dir)
-        ray_froms = np.tile(position, (num_rays, 1))
-        ray_tos = ray_froms + world_rays_dir * self.max_distance
-        
-        # 4. Raycast PyBullet (Batch = très rapide)
-        results = p.rayTestBatch(ray_froms, ray_tos)
-        
-        # 5. Filtrage des impacts
-        detected_points = []
-        for _, res in enumerate(results):
-            # res structure: (objectUniqueId, linkIndex, hitFraction, hitPosition, hitNormal)
-            hit_id = res[0]
-            if hit_id >= 0: # Si on a touché un objet (id >= 0)
-                hit_pos = np.array(res[3])
-                if hit_pos[2]>0.01:  # Filtre pour éviter les points trop proches
-                    hit_id = [round(coord, 3) for coord in hit_pos]
-                    detected_points.append(hit_pos)
-                
-        return detected_points
-    
-class HeightSensor:
-    def __init__(self, physics_client_id, noise_std=0.01, max_range=4.0):
-        """
-        Simule un capteur de distance orienté vers le bas (Down-facing Lidar/Sonar).
-        """
-        self.client_id = physics_client_id
-        self.noise_std = noise_std
-        self.max_range = max_range
-
-    def measure(self, pos, orn_q):
-        """
-        Retourne la distance mesurée vers le sol (ou None si hors de portée).
-        """
-        # 1. Calcul du vecteur direction (Le capteur pointe vers le "Bas" du drone)
-        # En repère monde, le bas du drone change si le drone penche (Roll/Pitch)
-        rot_mat = np.array(p.getMatrixFromQuaternion(orn_q)).reshape(3, 3)
-        # Le vecteur "Bas" dans le repère du drone est [0, 0, -1]
-        # On le tourne dans le repère monde
-        down_vec_world = rot_mat @ np.array([0, 0, -1])
-
-        # 2. Raycast (Tir du rayon)
-        start = np.array(pos)
-        end = start + (down_vec_world * self.max_range)
-        
-        results = p.rayTest(start, end, physicsClientId=self.client_id)
-        # results[0] contient [objectUniqueId, linkIndex, hitFraction, hitPosition, hitNormal]
-        
-        hit_fraction = results[0][2]
-        
-        # 3. Traitement
-        if hit_fraction == 1.0: # Rien touché
-            return None # Trop haut pour le capteur
-        
-        # Distance réelle = hit_fraction * max_range
-        dist = hit_fraction * self.max_range
-        
-        # Ajout du bruit
-        dist += np.random.normal(0, self.noise_std)
-        
-        # Protection valeurs négatives
-        return max(0.0, dist)

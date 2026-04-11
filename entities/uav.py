@@ -3,130 +3,37 @@ import csv
 import threading
 import pybullet as p
 import numpy as np
-import zmq 
+import zmq
 import json
 import random
 
 # Utility Imports & Control
-from utilities.utilities import point_in_cube
 from entities.agent import Agent
-from entities.sensor import GNSSensor, IMUSensor, LidarSensor
-from Control.EKF import EKF
+from entities.sensor import GNSSensor, IMUSensor
+from Control.EKF import INSGNSSFilter
+from Control.ESKF import ESKF
+from utilities import quaternion as Q
+from utilities.csv_buffer import CsvBuffer
 from environment.wind import DrydenGustModel
 from gym_pybullet_drones.control.DSLPIDControl import DSLPIDControl
 from gym_pybullet_drones.utils.enums import DroneModel
 
+
 class UAV(Agent):
-    """
-    Autonomous Unmanned Aerial Vehicle (UAV) simulator with physics, control, and swarm capabilities.
-    Integrates PyBullet physics engine with advanced control systems for realistic quadrotor simulation
-    in multi-agent environments. Features include:
-    **Physics & Control:**
-    - Precise rotor dynamics with thrust and torque coefficients
-    - DSL PID controller running at configurable frequency (default 100Hz)
-    - Aerodynamic drag modeling with airspeed compensation
-    - Quaternion-based orientation tracking
-    **Navigation & Planning:**
-    - A* path planning with asynchronous execution thread
-    - Waypoint management with dynamic replanning
-    - Repulsive force computation for obstacle avoidance
-    - Collision detection and safety radius enforcement
-    **Sensor Fusion:**
-    - Extended Kalman Filter (EKF) combining GNSS, IMU, and Lidar
-    - Realistic GNSS latency and noise simulation
-    - IMU measurement integration with body-frame acceleration
-    - Adaptive sensor scheduling based on configurable frequencies
-    **Swarm Coordination:**
-    - Leader-follower formation control
-    - ZMQ-based state broadcasting and message handling
-    - Neighbor tracking with network delay simulation
-    - Distributed decision-making for autonomous swarms
-    **Environmental Simulation:**
-    - Dryden Gust Model for realistic turbulence generation
-    - Wind-aware flight dynamics and airspeed calculations
-    - Support for generated or custom environment layouts
-    **Logging & Analysis:**
-    - CSV-based state logging at each control cycle
-    - Causal inference metrics: ground truth vs. estimated state
-    - Tracking error, collision flags, and interaction forces
-    - Comprehensive data for post-simulation analysis
-    Attributes:
-        config (dict): Configuration dictionary with UAV parameters
-        dt (float): Physics simulation timestep (typically 1/240)
-        physics_client_id (int): PyBullet client identifier
-        name (str): UAV identifier
-        bodyId (int): PyBullet body ID
-        CTRL_FREQ (int): Control loop frequency in Hz
-        CTRL_DT (float): Control timestep (1/CTRL_FREQ)
-        mass (float): UAV mass in kg
-        ekf (EKF): Extended Kalman Filter for state estimation
-        gnss (GNSSensor): GNSS sensor for position/velocity measurement
-        imu (IMUSensor): IMU sensor for acceleration measurement
-        lidar (LidarSensor): Lidar sensor for obstacle detection
-        planner: A* path planner instance
-        waypoints (list[np.ndarray]): List of target waypoints
-        active_path (list[np.ndarray]): Current planned path segments
-        swarm_active (bool): Whether UAV is part of active swarm
-        leader (bool): Whether UAV is swarm leader
-        other_agent_pos (dict): Positions of neighboring agents
-        message_buffer (list): Queue of delayed network messages
-        current_wind (np.ndarray): Current wind vector [m/s]
-        log_file (str): Path to CSV log file
-    """
-    def __init__(self, config: dict, physics_client_id: int, dt: float, known_obstacles_config: dict, planner, world_type: str):
-        """
-        Initialize a UAV entity with physics simulation, control systems, and autonomous capabilities.
-        
-        Args:
-            config (dict): Configuration dictionary containing:
-            - name (str): UAV identifier. Defaults to "UAV".
-            - body_id (int): Physics body ID. Defaults to 0000.
-            - mass (float): UAV mass in kg. Defaults to 1.5.
-            - urdf_path (str): Path to URDF model file. Defaults to "assets/quadrotor.urdf".
-            - start_pos (list): Initial position [x, y, z]. Defaults to [0, 0, 1.0].
-            - start_orn_euler (list): Initial orientation in Euler angles [roll, pitch, yaw]. Defaults to [0, 0, 0].
-            - waypoints (list[list]): List of waypoint coordinates [[x, y, z], ...]. Defaults to [[0, 0, 1]].
-            - ctrl_freq (int): Control loop frequency in Hz. Defaults to 100.
-            - wind_mean (list): Mean wind vector [x, y, z] in m/s. Defaults to [0, 0, 0].
-            - turbulence (float): Dryden gust model turbulence intensity (0-20). Defaults to 15.
-            - communication (dict): Network settings with keys:
-                - com_period (float): Broadcast interval in seconds. Defaults to 0.1.
-                - com_delay_mean (float): Mean communication latency. Defaults to 0.1.
-                - com_delay_std (float): Std dev of communication latency. Defaults to 0.02.
-            - sensors (dict): Sensor configurations with keys:
-                - gnss (dict): GNSS sensor settings (frequency, delay_mean, delay_std).
-                - imu (dict): IMU sensor settings (noise parameters).
-                - lidar (dict): Lidar sensor settings (frequency, range, noise).
-            - physics (dict): Physics parameters:
-                - thrust_coeff (float): Thrust coefficient KF. Defaults to 6.11e-8.
-                - torque_coeff (float): Torque coefficient KM. Defaults to 1.5e-9.
-                - max_rpm (float): Maximum rotor RPM. Defaults to 22000.
-                - max_speed (float): Maximum velocity in m/s. Defaults to 5.
-                - max_repulsive_force (float): Max obstacle avoidance force in N. Defaults to 2.0.
-                - safety_radius (float): Collision avoidance radius in m. Defaults to 2.0.
-            - radar (list, optional): Radar connection configs with ip and port.
-            physics_client_id (int): PyBullet physics client identifier.
-            dt (float): Physics simulation timestep in seconds (typically 1/240).
-            known_obstacles_config (list[dict]): Configuration list for static obstacles with keys:
-            - center (list): [x, y, z] center position.
-            - height, width, length (float): Obstacle dimensions.
-            planner: A* path planner instance with planning and repulsive force computation interface.
-            world_type (str): Environment type - "generated" or "custom".
-        
-        Initializes:
-            - Physics engine: Body properties, dynamics, external force/torque application.
-            - Control system: DSL PID controller running at configurable frequency (default 100Hz).
-            - Navigation: Waypoint management and A* path planning with async thread support.
-            - Sensor fusion: EKF with GNSS, IMU, and Lidar integration.
-            - Obstacle avoidance: Repulsive force computation and collision detection.
-            - Swarm coordination: Leader-follower formation control and neighbor tracking.
-            - Communication: ZMQ-based state broadcasting and message handling.
-            - Wind simulation: Dryden Gust Model for realistic turbulence.
-            - Logging: CSV state tracking with causal analysis metrics.
-        
-        Note:
-            Physics loop runs at 240Hz; logic/control loop runs at configurable frequency (100Hz default).
-        """
+    """Simulated quadrotor: PyBullet physics, PID controller (DSLPIDControl),
+    A* planning, GNSS/IMU navigation filter, communication with the swarm
+    (ZMQ) and CSV logs for the analysis."""
+
+    def __init__(
+        self,
+        config: dict,
+        physics_client_id: int,
+        dt: float,
+        known_obstacles_config: dict,
+        planner,
+        world_type: str,
+    ):
+        """config: drone section of config.yaml; dt: physics step (s)."""
         self.config = config
         self.dt = float(dt)
         self.physics_client_id = physics_client_id
@@ -136,15 +43,34 @@ class UAV(Agent):
         self.mass = config.get("mass", 1.5)  # kg
 
         urdf_path = config.get("urdf_path", "assets/quadrotor.urdf")
-        self.start_pos = config.get("start_pos", [0, 0, 1.0])
-        self.start_orn = p.getQuaternionFromEuler(config.get("start_orn_euler", [0,0,0]))
+        self.start_pos = list(config.get("start_pos", [0, 0, 1.0]))
+
+        # Minimum spawn altitude: a drone placed at z = 0 sticks to the ground
+        self.spawn_min_alt = float(config.get("spawn_min_alt", 0.15))
+        if self.start_pos[2] < self.spawn_min_alt:
+            print(
+                f"[{config.get('name', 'UAV')}] start_pos z={self.start_pos[2]:.3f} "
+                f"< {self.spawn_min_alt:.3f} : remonte a {self.spawn_min_alt:.3f} "
+                f"(apparition en contact avec le sol)"
+            )
+            self.start_pos[2] = self.spawn_min_alt
+
+        self.start_orn = p.getQuaternionFromEuler(config.get("start_orn_euler", [0, 0, 0]))
         super().__init__(urdf_path, self.start_pos, self.start_orn, physics_client_id, self.dt)
         self._sim_time = 0.0
-        
-        # --- CONTROL FREQUENCY OPTIMIZATION (100Hz) ---
-        self.CTRL_FREQ = self.config.get("ctrl_freq", 100)
-        self.CTRL_DT = 1.0 / self.CTRL_FREQ
-        self.last_ctrl_time = -self.CTRL_DT  # Force update at t=0
+        self._tick = 0
+
+        # Control every ctrl_every physics steps: CTRL_DT is a multiple of dt
+        self.CTRL_FREQ = float(self.config.get("ctrl_freq", 100))
+        self.ctrl_every = max(1, int(round(1.0 / (self.CTRL_FREQ * self.dt))))
+        self.CTRL_DT = self.ctrl_every * self.dt
+        if abs(1.0 / self.CTRL_DT - self.CTRL_FREQ) > 0.02 * self.CTRL_FREQ:
+            print(
+                f"[{config.get('name', 'UAV')}] ctrl_freq={self.CTRL_FREQ:g} Hz non "
+                f"multiple du pas physique : controle a {1.0 / self.CTRL_DT:.1f} Hz"
+            )
+        # The first control happens at step 1 (t = dt): nominal interval
+        self.last_ctrl_time = self.dt - self.CTRL_DT
 
         # --- PHYSICS ---
         self.KF = self.config.get("physics", {}).get("thrust_coeff", 6.11e-8)
@@ -153,52 +79,110 @@ class UAV(Agent):
         self.MAX_RPM = config.get("physics", {}).get("max_rpm", 22000.0)
         self.max_speed = config.get("physics", {}).get("max_speed", 5)
         self.DRAG_COEFF = np.array([9.17e-7, 9.17e-7, 10.31e-7])
-        
+
         self.ctrl = DSLPIDControl(drone_model=DroneModel.CF2X)
         self.last_rpms = np.zeros(4)
-        
+
+        # Maximum commanded tilt (deg)
+        self.max_tilt_deg = float(self.config.get("max_tilt_deg", 30.0))
+        # Flight near the ground
+        self.ground_min_alt = float(self.config.get("ground_min_alt", 0.15))
+        self.ground_clear_alt = float(self.config.get("ground_clear_alt", 0.6))
+        self.ground_speed_floor = float(self.config.get("ground_speed_floor", 0.1))
+        self.ground_tilt_deg = float(self.config.get("ground_tilt_deg", 10.0))
+        self.max_descent_speed = float(self.config.get("max_descent_speed", 1.5))
+        self.max_climb_speed = float(self.config.get("max_climb_speed", 1.2))
+        # Maximum rate of the yaw setpoint (rad/s)
+        self.max_yaw_rate = float(self.config.get("max_yaw_rate", 1.0))
+        self._yaw_cmd = float(config.get("start_orn_euler", [0, 0, 0])[2])
+        self.ground_descent_speed = float(self.config.get("ground_descent_speed", 0.4))
+        self._ground_factor = 1.0
+        # Maximum share of the horizontal demand left to the integral term
+        self.integral_share = float(self.config.get("integral_share", 0.3))
+        # Allowed vertical thrust, as a fraction of the weight
+        self.min_thrust_ratio = float(self.config.get("min_thrust_ratio", 0.6))
+        self.max_thrust_ratio = float(self.config.get("max_thrust_ratio", 1.6))
+        self._loss_of_control = False
+
         # --- NAVIGATION ---
         wp_list = config.get("waypoints", [])
         if not wp_list:
             wp_list = [[0, 0, 1]]
-        first_wp = np.array(self.start_pos) + np.array([0, 0, 1])
-        self.waypoints = [first_wp] + [np.array(w) for w in wp_list]
+
+        # Waypoints raised to a minimum altitude (a waypoint on the ground blocks A*)
+        self.min_waypoint_alt = float(config.get("min_waypoint_alt", 0.30))
+        clamped = 0
+        wp_clean = []
+        for w in wp_list:
+            w = np.array(w, dtype=float)
+            if w[2] < self.min_waypoint_alt:
+                w[2] = self.min_waypoint_alt
+                clamped += 1
+            wp_clean.append(w)
+        if clamped:
+            print(
+                f"[{config.get('name', 'UAV')}] {clamped} waypoint(s) sous "
+                f"{self.min_waypoint_alt:.2f} m releve(s) a cette altitude "
+                f"(un waypoint au sol bloque le planificateur et le controle)"
+            )
+
+        first_wp = np.array(self.start_pos, dtype=float) + np.array([0.0, 0.0, 1.0])
+        self.waypoints = [first_wp] + wp_clean
         self.wp_idx = 0
-        
+
+        # Waypoint sequencing
+        self.wp_tol = float(config.get("wp_tolerance", 0.5))  # clean arrival
+        self.wp_capture = float(config.get("wp_capture_radius", 1.5))  # capture radius
+        self.wp_hyst = float(config.get("wp_hysteresis", 0.3))  # "overshoot" margin
+        self._wp_track_idx = -1
+        self._wp_min_dist = np.inf
+
         # --- OBSTACLES & PLANNING ---
         self.obs_dic = known_obstacles_config  # Combined list for avoidance
         print(len(self.obs_dic), "known obstacle points loaded.")
         self.environment = world_type
-        
+
         self.planner = planner
-        
+
         self.target_yaw_cache = 0.0
-        
-        self.max_repulsive_force = self.config.get("physics", {}).get("max_repulsive_force", 2.0)
-        self.safety_radius = self.config.get("physics", {}).get("safety_radius", 2.0)
+
+        # Avoidance parameters, in physics or at drone level
+        phys = self.config.get("physics", {}) or {}
+        self.max_repulsive_force = float(
+            phys.get("max_repulsive_force", self.config.get("max_repulsive_force", 2.0))
+        )
+        self.safety_radius = float(phys.get("safety_radius", self.config.get("safety_radius", 2.0)))
+        self.repulsion_gain_s = float(self.config.get("repulsion_gain_s", 3.0 / 80.0))
+        self.lookahead_m = float(self.config.get("lookahead_m", 1.0))
+        self.last_repulsive_force_mag = 0.0
+        self.dist_to_nearest_neighbor = float("inf")
 
         # Planning States
         self.active_path = []
-        self.is_planning = False      
-        self.planning_thread = None   
-        self.replan_timer = 0         
+        self.is_planning = False
+        self.planning_thread = None
+        self.replan_timer = 0
         self.calculation_fail_count = 0
+        # Retry A* after a failure (~1.25 s)
+        self.replan_ticks = max(1, int(round(1.25 / self.CTRL_DT)))
+        self.planning_sync = bool(self.config.get("planning_sync", False))
+        self.direct_leg_xy = float(self.config.get("direct_leg_xy", 0.75))
+        self._plan_wp_idx = -1  # waypoint for which a plan exists
+        self._planning_for_wp = -1  # waypoint targeted by the running computation
+        self._hold_pos = None  # hold point (waiting / end of mission)
 
         self.zmq_ctx = zmq.Context()
         self.sub_socket = None
         self.pub_socket = None
-        self.radar_sub_socket = None 
+        self.radar_sub_socket = None
 
         # --- SWARM CONTROL ---
         self.swarm_active = False
-        self.swarm_target_pos = None
-        self.swarm_target_vel = None
-        self.swarm_target_yaw = None 
         self.leader = False
         self.other_agent_pos = {}
-        self.neighbors_data = {} 
+        self.neighbors_data = {}
         self.swarm_name = []
-        
+
         # --- COMMUNICATION ---
         com = self.config.get("communication")
         self.com_period = com.get("com_period", 0.1)
@@ -206,68 +190,139 @@ class UAV(Agent):
         self.message_buffer = []
         self.perception_delay_mean = com.get("com_delay_mean", 0.1)  # 100ms delay
         self.perception_delay_std = com.get("com_delay_std", 0.02)  # +/- 20ms
-        
+
         # --- SENSORS ---
         sens = self.config.get("sensors", {})
-        self.ekf = EKF(self.CTRL_DT)
-        self.ekf.x[:3] = self.start_pos
+
+        # Navigation filter: "eskf" (15 states, default) or "kf6" (position-velocity)
+        fcfg = dict(self.config.get("filter", {}) or {})
+        self.filter_type = str(fcfg.get("type", "eskf")).lower()
+        start_yaw = float(config.get("start_orn_euler", [0, 0, 0])[2])
+        fcfg.setdefault("initial_yaw", start_yaw)
+        FilterClass = ESKF if self.filter_type == "eskf" else INSGNSSFilter
+        self.ekf = FilterClass(
+            self.CTRL_DT, gnss_config=sens.get("gnss", {}), imu_config=sens.get("imu", {}), config=fcfg
+        )
+        self.ekf.init_state(self.start_pos, np.zeros(3))
+
+        # Attitude used by the inner loop: "truth" (default) or "filter" (ESKF)
+        self.attitude_source = str(fcfg.get("attitude_source", "truth")).lower()
+        if self.attitude_source == "filter" and self.filter_type != "eskf":
+            print(
+                f"[{self.name}] attitude_source='filter' exige filter.type='eskf' : attitude vraie utilisee"
+            )
+            self.attitude_source = "truth"
+        self._gnss_updated = False
+        self._gnss_err = float("nan")
         self.gnss = GNSSensor(sens.get("gnss", {}))
-        self.imu = IMUSensor(sens.get("imu", {}))
-        self.lidar = LidarSensor(sens.get("lidar", {}))
-        
-        lidar_freq = sens.get("lidar", {}).get("frequency", 10.0)
-        self.lidar_period = 1.0 / lidar_freq
-        self.last_lidar_time = -self.lidar_period
-        
-        self.gnss_freq = sens.get("gnss", {}).get("frequency", 10.0)  # 10 Hz (Realistic Standard)
+        # IMU read at the control rate
+        self.imu = IMUSensor(sens.get("imu", {}), dt=self.CTRL_DT)
+        self.last_imu_gyro = np.zeros(3)
+
+        self.gnss_freq = sens.get("gnss", {}).get("frequency", 10.0)  # 10 Hz
         self.gnss_dt = 1.0 / self.gnss_freq
         self.last_gnss_update_time = -self.gnss_dt
         self.gnss_delay_mean = sens.get("gnss", {}).get("delay_mean", 0.1)
         self.gnss_delay_std = sens.get("gnss", {}).get("delay_std", 0.01)
         self.next_gnss_trigger = 0.0
-        
+
+        # GNSS schedule and last measurement received
+        self.last_gnss_nominal_time = 0.0
+        self.last_gnss_meas_pos = np.array(self.start_pos, dtype=np.float32)
+        self.last_gnss_meas_vel = np.zeros(3, dtype=np.float32)
+
         # --- WIND ---
-        # Backward compatible parsing:
-        # - preferred: config['wind'] = {'wind_mean': [x,y,z], 'turbulence': val}
-        # - legacy:    config['wind_mean'], config['turbulence']
+        # wind: wind_mean, turbulence, and optionally a burst (burst_start, burst_end, burst_turbulence)
         self.current_wind = np.zeros(3)
         wind_cfg = self.config.get("wind", {}) if isinstance(self.config.get("wind", {}), dict) else {}
         self.mean_wind = wind_cfg.get("wind_mean", self.config.get("wind_mean", [0, 0, 0]))
         self.turbulence = wind_cfg.get("turbulence", self.config.get("turbulence", 15))
-        self.wind_module = DrydenGustModel(self.dt, self.turbulence, self.mean_wind)
-        
-        # radar 
+        burst = None
+        if "burst_turbulence" in wind_cfg:
+            burst = (
+                float(wind_cfg.get("burst_start", 0.0)),
+                float(wind_cfg.get("burst_end", float("inf"))),
+                float(wind_cfg["burst_turbulence"]),
+            )
+        self.wind_module = DrydenGustModel(self.dt, self.turbulence, self.mean_wind, burst=burst)
+
+        # radar
         radar_list = self.config.get("radar", None)
         if radar_list:
             self.radar_com_setup(radar_list)
-        
+
         # Logs
         self.logging_enabled = True
         # Logs (allow per-run log directory)
         log_dir = self.config.get("log_dir", "logs")
         self.log_file = os.path.join(log_dir, f"{self.name}.csv")
         os.makedirs(log_dir, exist_ok=True)
-        if os.path.exists(self.log_file): os.remove(self.log_file)
-        
-        
+        if os.path.exists(self.log_file):
+            os.remove(self.log_file)
+
         # Complete header for causal analysis
         with open(self.log_file, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow([
-                "time", 
-                "gt_x", "gt_y", "gt_z",         # Ground Truth
-                "gt_vx", "gt_vy", "gt_vz",      
-                "meas_x", "meas_y", "meas_z",  # Sensors
-                "gnss_error_mag",
-                "wind_x", "wind_y", "wind_z",  # Environment
-                "wind_mag",
-                "rep_force_mag",                # Interaction
-                "nearest_neighbor_dist",
-                "target_x", "target_y", "target_z",  # Intent
-                "tracking_error_mag",
-                "collision_flag"                # Flags
-            ])
-        
+            writer.writerow(
+                [
+                    "time",
+                    "gt_x",
+                    "gt_y",
+                    "gt_z",  # Ground Truth
+                    "gt_vx",
+                    "gt_vy",
+                    "gt_vz",
+                    "meas_x",
+                    "meas_y",
+                    "meas_z",  # Sensors
+                    "gnss_error_mag",
+                    "ekf_x",
+                    "ekf_y",
+                    "ekf_z",
+                    "ekf_pos_error_mag",
+                    "wind_x",
+                    "wind_y",
+                    "wind_z",  # Environment
+                    "wind_mag",
+                    "rep_force_mag",  # Interaction
+                    "nearest_neighbor_dist",
+                    "target_x",
+                    "target_y",
+                    "target_z",  # Intent
+                    "tracking_error_mag",
+                    "collision_flag",  # Flags
+                ]
+            )
+
+        # Filter validation log (error = estimated - true)
+        xyz = ("x", "y", "z")
+        self.filter_log = CsvBuffer(
+            os.path.join(log_dir, f"{self.name}_filter.csv"),
+            ["time"]
+            + [f"e_p{a}" for a in xyz]
+            + [f"e_v{a}" for a in xyz]
+            + [f"e_r{a}" for a in xyz]
+            + [f"e_ba{a}" for a in xyz]
+            + [f"e_bg{a}" for a in xyz]
+            + [f"sig_p{a}" for a in xyz]
+            + [f"sig_v{a}" for a in xyz]
+            + [f"sig_r{a}" for a in xyz]
+            + [f"sig_ba{a}" for a in xyz]
+            + [f"sig_bg{a}" for a in xyz]
+            + [f"ba{a}" for a in xyz]
+            + [f"bg{a}" for a in xyz]
+            + [f"ba_true{a}" for a in xyz]
+            + [f"bg_true{a}" for a in xyz]
+            + ["nees", "nees_full", "nis", "gnss_update", "gnss_available", "gnss_err"],
+        )
+        # True trajectory, to replay the filters offline
+        self.truth_log = None
+        if self.config.get("log_truth", True):
+            self.truth_log = CsvBuffer(
+                os.path.join(log_dir, f"{self.name}_truth.csv"),
+                ["time", "px", "py", "pz", "vx", "vy", "vz", "qx", "qy", "qz", "qw"],
+            )
+
         if self.pub_socket is not None:
             self.broadcast_state(pos=self.start_pos, vel=[0, 0, 0])
         p.changeDynamics(self.bodyId, -1, linearDamping=0, angularDamping=0)
@@ -283,133 +338,209 @@ class UAV(Agent):
     # -----------------------------------------------------------------------
     # Obstacle management and path planning
     # -----------------------------------------------------------------------
+    def _log_filter_state(self, gt):
+        """Filter errors, standard deviations, biases, NEES and NIS in <name>_filter.csv."""
+        buf = getattr(self, "filter_log", None)
+        if buf is None:
+            return
+
+        def fmt(v):
+            return "" if (v is None or not np.isfinite(v)) else f"{v:.6g}"
+
+        nan3 = [np.nan] * 3
+        ba_true = self.imu.accel_error_det
+        bg_true = self.imu.gyro_error_det
+        if isinstance(self.ekf, ESKF):
+            # error_vector returns true - estimated: flip the sign
+            e = -self.ekf.error_vector(gt["pos"], gt["vel"], gt["orn_q"], ba_true, bg_true)
+            sig = self.ekf.sigmas()
+            nees_pv, nees_full = self.ekf.nees(gt["pos"], gt["vel"], gt["orn_q"], ba_true, bg_true)
+            ba, bg = list(self.ekf.ba), list(self.ekf.bg)
+        else:
+            e = np.r_[np.asarray(self.ekf.x[:6]) - np.r_[gt["pos"], gt["vel"]], [np.nan] * 9]
+            sig = np.r_[self.ekf.sigmas(), [np.nan] * 9]
+            nees_pv, nees_full = self.ekf.nees(gt["pos"], gt["vel"]), np.nan
+            ba, bg = nan3, nan3
+        nis = self.ekf.last_nis if self._gnss_updated else np.nan
+
+        buf.write(
+            [f"{self._sim_time:.6f}"]
+            + [fmt(v) for v in e]
+            + [fmt(v) for v in sig]
+            + [fmt(v) for v in ba]
+            + [fmt(v) for v in bg]
+            + [fmt(v) for v in ba_true]
+            + [fmt(v) for v in bg_true]
+            + [
+                fmt(nees_pv),
+                fmt(nees_full),
+                fmt(nis),
+                int(self._gnss_updated),
+                int(self.gnss.available),
+                # GNSS error at measurement time
+                fmt(self._gnss_err) if self._gnss_updated else "",
+            ]
+        )
+
+    def _log_truth(self, gt):
+        if self.truth_log is None:
+            return
+        q = Q.normalize(gt["orn_q"])
+        self.truth_log.write(
+            [f"{self._sim_time:.6f}"]
+            + [f"{v:.9g}" for v in gt["pos"]]
+            + [f"{v:.9g}" for v in gt["vel"]]
+            + [f"{v:.12g}" for v in q]
+        )
+
+    def close_logs(self):
+        """Write the rows still in memory. Called by SimulationManager.stop()."""
+        for buf in (getattr(self, "filter_log", None), getattr(self, "truth_log", None)):
+            if buf is not None:
+                buf.close()
+
+    def _limit_tilt_demand(self, virtual_target_pos, final_target_vel, pos, vel):
+        """Bound the setpoint sent to the PID: vertical thrust, vertical speed and
+        commanded tilt (below max_tilt_deg). The horizontal error is reduced
+        without changing its direction, and the integral term is limited."""
+        P = np.asarray(self.ctrl.P_COEFF_FOR, dtype=float)
+        D = np.asarray(self.ctrl.D_COEFF_FOR, dtype=float)
+        I = np.asarray(self.ctrl.I_COEFF_FOR, dtype=float)
+        weight = float(self.ctrl.GRAVITY)  # m*g in N, DSL convention
+        integ = getattr(self.ctrl, "integral_pos_e", None)
+
+        pos_e = np.asarray(virtual_target_pos, dtype=float) - np.asarray(pos, dtype=float)
+        vel_e = np.asarray(final_target_vel, dtype=float) - np.asarray(vel, dtype=float)
+        pos_e = pos_e.copy()
+        vel_e = vel_e.copy()
+
+        # 1. Bounded vertical thrust: the thrust axis must keep pointing up
+        cz = float(I[2] * integ[2]) if integ is not None else 0.0
+        uz = float(P[2] * pos_e[2] + D[2] * vel_e[2])
+        tz_min = self.min_thrust_ratio * weight
+        tz_max = self.max_thrust_ratio * weight
+        tz = uz + cz + weight
+        if tz < tz_min and uz < 0.0:
+            kz = float(np.clip((tz_min - weight - cz) / uz, 0.0, 1.0))
+            pos_e[2] *= kz
+            vel_e[2] *= kz
+        elif tz > tz_max and uz > 0.0:
+            kz = float(np.clip((tz_max - weight - cz) / uz, 0.0, 1.0))
+            pos_e[2] *= kz
+            vel_e[2] *= kz
+        tz = float(P[2] * pos_e[2] + D[2] * vel_e[2]) + cz + weight
+
+        # 1b. Bounded vertical speed, slower descent near the ground
+        gf = getattr(self, "_ground_factor", 1.0)
+        v_down_max = self.ground_descent_speed + (self.max_descent_speed - self.ground_descent_speed) * gf
+        tz_floor = tz_min
+        # near the ground, no free fall
+        tz_floor = max(
+            tz_floor, weight * (self.min_thrust_ratio + (0.9 - self.min_thrust_ratio) * (1.0 - gf))
+        )
+        if float(vel[2]) < -v_down_max:
+            tz_floor = max(tz_floor, 1.15 * weight)  # descending too fast: brake
+        if float(vel[2]) > self.max_climb_speed and tz > weight:
+            uz_cap = 0.0 - cz  # no more upward acceleration
+            if D[2] > 1e-9:
+                vel_e[2] = (uz_cap - P[2] * pos_e[2]) / D[2]
+            tz = weight
+        if tz < tz_floor and D[2] > 1e-9:
+            uz_new = tz_floor - weight - cz
+            vel_e[2] = (uz_new - P[2] * pos_e[2]) / D[2]
+            tz = tz_floor
+        tz = max(tz, tz_min)
+
+        # 2. Allowed tilt, lower near the ground
+        gf = getattr(self, "_ground_factor", 1.0)
+        tilt_deg = self.ground_tilt_deg + (self.max_tilt_deg - self.ground_tilt_deg) * gf
+        limit = float(np.tan(np.radians(tilt_deg)) * tz)
+
+        # 3. Limit of the horizontal integral term
+        c = np.zeros(2)
+        if integ is not None:
+            c = I[:2] * integ[:2]
+            c_max = self.integral_share * limit
+            nc = float(np.linalg.norm(c))
+            if nc > c_max and nc > 1e-12:
+                integ[:2] *= c_max / nc  # changes the controller state
+                c = I[:2] * integ[:2]
+
+        u = P[:2] * pos_e[:2] + D[:2] * vel_e[:2]
+
+        # 4. Largest k in [0, 1] such that |k u + c| <= limit
+        if float(np.linalg.norm(u + c)) > limit:
+            uu, uc, cc = float(u @ u), float(u @ c), float(c @ c)
+            if uu < 1e-18:
+                k = 0.0
+            else:
+                disc = uc * uc - uu * (cc - limit * limit)
+                k = (-uc + np.sqrt(max(disc, 0.0))) / uu
+                k = float(np.clip(k, 0.0, 1.0))
+            pos_e[:2] *= k
+            vel_e[:2] *= k
+
+        virtual_target_pos = np.asarray(pos, dtype=float) + pos_e
+        final_target_vel = np.asarray(vel, dtype=float) + vel_e
+        return virtual_target_pos, final_target_vel
+
     def _trigger_planning(self, start_pos, target_pos):
-        """
-        Initiates an asynchronous path planning thread using the A* algorithm.
-        
-        Creates and starts a daemon thread that runs the async planning routine if one is not already
-        in progress. This method prevents concurrent planning operations by checking the `is_planning` flag.
-        
-        Args:
-            start_pos: The starting position for path planning (coordinates or position object).
-            target_pos: The target/goal position for path planning (coordinates or position object).
-        
-        Returns:
-            None
-        
-        Side Effects:
-            - Sets `self.is_planning` to True when a new planning thread is started.
-            - Creates and starts a daemon thread stored in `self.planning_thread`.
-            - Prints a status message indicating planning has started.
-        
-        Notes:
-            - This method is designed to be non-blocking; actual planning happens in a separate thread.
-            - The planning thread is set as a daemon, so it won't prevent program termination.
-            - Subsequent calls while `is_planning` is True will be ignored.
-        """
-        if not self.is_planning:
-            self.is_planning = True
-            print(f"[{self.name}] ⏳ Starting A* Thread...")
-            self.planning_thread = threading.Thread(
-                target=self._run_async_plan, 
-                args=(start_pos, target_pos)
-            )
-            self.planning_thread.daemon = True 
-            self.planning_thread.start()
-        if not self.is_planning:
-            self.is_planning = True
-            print(f"[{self.name}] ⏳ Starting A* Thread...")
-            self.planning_thread = threading.Thread(
-                target=self._run_async_plan, 
-                args=(start_pos, target_pos)
-            )
-            self.planning_thread.daemon = True 
-            self.planning_thread.start()
+        """Start the A* computation in a thread (or directly if planning_sync)."""
+        if self.is_planning:
+            return
+        start_pos = np.asarray(start_pos, dtype=float)
+        target_pos = np.asarray(target_pos, dtype=float)
+
+        # Vertical leg: nothing for A* to compute (2D grid)
+        if float(np.linalg.norm(target_pos[:2] - start_pos[:2])) < self.direct_leg_xy:
+            self.active_path = [target_pos.copy()]
+            self._plan_wp_idx = self.wp_idx
+            self.calculation_fail_count = 0
+            return
+
+        self._planning_for_wp = self.wp_idx
+        self.is_planning = True
+        if self.planning_sync:
+            # Deterministic mode for Monte-Carlo campaigns
+            self._run_async_plan(start_pos, target_pos)
+            return
+        print(f"[{self.name}] Starting A* thread...")
+        self.planning_thread = threading.Thread(target=self._run_async_plan, args=(start_pos, target_pos))
+        self.planning_thread.daemon = True
+        self.planning_thread.start()
 
     def _run_async_plan(self, start_pos, target_pos):
-        """
-        Execute asynchronous path planning from start to target position.
-        Attempts to compute a path using the planner. Updates active_path if successful,
-        otherwise increments failure counter. Sets is_planning flag to False upon completion.
-        :param start_pos: Starting position coordinates
-        :param target_pos: Target position coordinates
-        """
+        """Compute the A* path and update active_path."""
         try:
             path = self.planner.plan(start_pos, target_pos)
-            if path and len(path) > 0:
-                self.active_path = path 
+            # Plan ignored if the waypoint changed during the computation
+            if path and len(path) > 0 and self._planning_for_wp == self.wp_idx:
+                self.active_path = [np.asarray(w, dtype=float) for w in path]
+                self._plan_wp_idx = self.wp_idx
                 self.calculation_fail_count = 0
-            else:
+            elif not path:
                 self.calculation_fail_count += 1
         except Exception as e:
-            print(f"[{self.name}] 💥 Error in A* thread: {e}")
+            # An exception counts as a failure
+            self.calculation_fail_count += 1
+            print(f"[{self.name}] Error in A* thread: {e}")
         finally:
-            self.is_planning = False 
+            self.is_planning = False
 
-    def _analyze_target_accessibility(self, start_pos, target_pos):
-        """
-        Analyze target accessibility by checking obstacles and line-of-sight.
-        
-        Validates whether a target position can be reached from the start position by:
-        1. Checking if target is inside any known obstacle
-        2. Checking if direct line-of-sight is blocked by collisions
-        
-        Args:
-            start_pos (np.ndarray): Starting position [x, y, z]
-            target_pos (np.ndarray): Target position [x, y, z]
-        
-        Returns:
-            str: One of "INVALID" (target in obstacle), "BLOCKED" (line-of-sight obstructed), or "CLEAR"
-        """
-        for obstacle in self.obs_dic:
-            if point_in_cube(target_pos, obstacle):
-                return "INVALID"
-
-        if self.planner.building_tree is not None:
-            indices = self.planner.building_tree.query_ball_point(target_pos[:2], r=5.0)
-            for idx in indices:
-                obs = self.obs_dic[idx]
-                center = np.array(obs["center"])
-                h = obs["height"]
-                if target_pos[2] < h + 1.0 and point_in_cube(target_pos, obs):
-                    return "INVALID"
-
-        return "CLEAR"
-        for obstacle in self.obs_dic:
-            if point_in_cube(target_pos, obstacle):
-                return "INVALID"
-        if p.raycast(start_pos, target_pos)[1][0] >= 0:
-            return "BLOCKED"
-        return "CLEAR"
-    
     def _compute_repulsive_force(self, current_pos):
-        """
-        Compute repulsive force from obstacles and other agents.
-        
-        Combines repulsive forces from:
-        - Other UAVs: Inverse-distance force within safety radius
-        - Static obstacles: AABB-based collision avoidance using spatial indexing
-        
-        Returns normalized force vector capped at max_repulsive_force magnitude.
-        
-        Args:
-            current_pos (np.ndarray): Current 3D position [x, y, z]
-        
-        Returns:
-            np.ndarray: Repulsive force vector [fx, fy, fz] in Newtons
-        """
+        """Repulsion from other drones and nearby buildings, bounded by max_repulsive_force."""
         force_vec = np.array([0.0, 0.0, 0.0])
         min_dist = np.inf
-        
+
         # Check other agents
         if self.other_agent_pos != {}:
             for _, other_pos in self.other_agent_pos.items():
                 diff = current_pos - other_pos
                 dist_uav = np.linalg.norm(diff)
-                if dist_uav < min_dist: 
+                if dist_uav < min_dist:
                     min_dist = dist_uav
                 if dist_uav < self.safety_radius:
-                    mag = (1.0 - (dist_uav / self.safety_radius))
+                    mag = 1.0 - (dist_uav / self.safety_radius)
                     force_vec += ((diff / dist_uav) * mag * self.max_repulsive_force) / 2
 
         # Check if planner and its index are ready
@@ -421,14 +552,14 @@ class UAV(Agent):
 
         # Find indices of nearby buildings (e.g., 15m radius)
         indices = self.planner.building_tree.query_ball_point(current_pos[:2], r=15.0)
-    
+
         for idx in indices:
-            obs = self.obs_dic[idx] 
+            obs = self.obs_dic[idx]
             center = np.array(obs["center"])
             h, w, l = obs["height"], obs["width"], obs["length"]
-        
+
             # Skip if UAV is above building
-            if current_pos[2] > h + 1.0: 
+            if current_pos[2] > h + 1.0:
                 continue
 
             # Define axis-aligned bounding box (AABB)
@@ -455,7 +586,7 @@ class UAV(Agent):
 
             # Apply repulsive force
             if dist < self.safety_radius:
-                mag = (1.0 - (dist / self.safety_radius))
+                mag = 1.0 - (dist / self.safety_radius)
                 # diff / dist vector is now perpendicular to wall
                 force_vec[:2] += (diff / dist) * mag * self.max_repulsive_force
 
@@ -468,14 +599,13 @@ class UAV(Agent):
         self.dist_to_nearest_neighbor = min_dist
 
         return force_vec
-    
+
     # -----------------------------------------------------------------------
     # COMMUNICATION
     # -----------------------------------------------------------------------
     def setup_network_swarm(self, ip, port_pub_swarm, port_sub_swarm):
 
-        # Defensive close if re-running multiple simulations in the same process
-        # (e.g., ablation suite). On Windows, stale sockets can keep ports busy.
+        # Close old sockets (several simulations in the same process)
         for attr in ("sub_socket", "pub_socket"):
             sock = getattr(self, attr, None)
             if sock is not None:
@@ -484,9 +614,7 @@ class UAV(Agent):
                 except Exception:
                     pass
 
-        # IMPORTANT: In this architecture, the Swarm proxy thread binds the ports
-        # (XSUB/XPUB). UAVs must CONNECT (not bind), otherwise you'll hit
-        # EACCES/"Permission denied" on Windows when ports are already in use.
+        # The swarm proxy binds, drones only connect
         self.sub_socket = self.zmq_ctx.socket(zmq.SUB)
         self.sub_socket.connect(f"tcp://{ip}:{port_sub_swarm}")
         self.sub_socket.setsockopt_string(zmq.SUBSCRIBE, "")
@@ -501,20 +629,7 @@ class UAV(Agent):
         self.pub_socket.setsockopt(zmq.LINGER, 0)
 
     def radar_com_setup(self, radars_list):
-        """
-        Setup ZMQ socket for radar communication.
-        
-        Connects to one or more radar sources specified in the configuration.
-        Creates a SUB socket with non-blocking mode and optional conflation.
-        
-        Args:
-            radars_list (list[dict]): List of radar configurations, each with:
-            - ip (str): Radar server IP address
-            - port (int): Radar server port number
-        
-        Returns:
-            None
-        """
+        """ZMQ subscription to the radars in the configuration."""
         self.radar_sub_socket = self.zmq_ctx.socket(zmq.SUB)
         self.radar_sub_socket.setsockopt_string(zmq.SUBSCRIBE, "")
         self.radar_sub_socket.setsockopt(zmq.RCVTIMEO, 1)
@@ -528,22 +643,18 @@ class UAV(Agent):
             # Get info from config.yaml
             ip = radar_info.get('ip', 'localhost')
             port = radar_info.get('port')
-            
+
             if port:
                 address = f"tcp://{ip}:{port}"
                 print(f"[{self.name}] Connecting to radar defined in config: {address}")
                 self.radar_sub_socket.connect(address)
             else:
-                print(f"[{self.name}] ⚠️ Error: Radar port not specified in config.")
-        
+                print(f"[{self.name}] Error: radar port not specified in config.")
+
     def broadcast_state(self, pos, vel):
-        """
-        Broadcast current UAV state to swarm network.
-        Sends position, velocity, yaw, and simulation time as JSON via ZMQ pub socket.
-        Rounds values to 3 decimal places for network efficiency.
-        """
-        if not hasattr(self, "pub_socket"):
-            return 
+        """Broadcast the drone state to the swarm (JSON over ZMQ)."""
+        if getattr(self, "pub_socket", None) is None:
+            return
         pos = [round(p, 3) for p in pos]
         vel = [round(v, 3) for v in vel]
         msg = {
@@ -551,17 +662,12 @@ class UAV(Agent):
             "pos": pos,
             "vel": vel,
             "yaw": round(self.target_yaw_cache, 3),
-            "sim_time": round(self._sim_time, 3)
+            "sim_time": round(self._sim_time, 3),
         }
         self.pub_socket.send_string("State " + json.dumps(msg))
 
     def listen_radar(self):
-        """
-        Process incoming radar messages with simulated perception delay.
-        Buffers messages with random delay to simulate network latency, then processes them
-        when their target time is reached. Extracts detected agent positions and updates
-        neighbor tracking for collision avoidance and swarm coordination.
-        """
+        """Read the radar messages, with a simulated perception delay."""
         while True:
             try:
                 # Non-blocking read
@@ -575,12 +681,11 @@ class UAV(Agent):
             except Exception as e:
                 print(f"Network error on {self.name}: {e}")
                 break
-            
+
         buffer_remaining = []
 
         for target_time, msg in self.radar_message_buffer:
             if self._sim_time >= target_time:
-                # --- MESSAGE IS READY: PROCESS IT ---
                 if " " in msg:
                     _, json_str = msg.split(" ", 1)
                     try:
@@ -588,7 +693,7 @@ class UAV(Agent):
                         radar_data = data.get("data", {})
                         for d_name, d_info in radar_data.items():
                             self.neighbors_data[d_name] = d_info
-                            
+
                             if d_name != self.name:
                                 if not self.leader:
                                     pos = d_info["pos"]
@@ -596,24 +701,18 @@ class UAV(Agent):
                                 elif d_name not in self.swarm_name:
                                     pos = d_info["pos"]
                                     self.other_agent_pos[d_name] = np.array(pos)
-                            if d_name == self.name: 
+                            if d_name == self.name:
                                 self.radar_reports = d_info
                     except ValueError:
                         pass
             else:
                 buffer_remaining.append((target_time, msg))
-                # --- NOT READY YET: KEEP IT ---
-        
+
         # Replace buffer with remaining messages
         self.radar_message_buffer = buffer_remaining
 
     def listen_swarm(self):
-        """
-        Process incoming swarm messages with simulated perception delay.
-        Buffers messages with random delay to simulate latency, then processes them
-        when their target time is reached. Handles SWARM (neighbor updates) and 
-        FUTURE_POS (state predictions) message types.
-        """
+        """Read the swarm messages, with a simulated perception delay."""
         while True:
             try:
                 # Non-blocking read
@@ -627,12 +726,11 @@ class UAV(Agent):
             except Exception as e:
                 print(f"Network error on {self.name}: {e}")
                 break
-            
+
         buffer_remaining = []
 
         for target_time, msg in self.message_buffer:
             if self._sim_time >= target_time:
-                # --- MESSAGE IS READY: PROCESS IT ---
                 if " " in msg:
                     topic, json_str = msg.split(" ", 1)
                     try:
@@ -645,13 +743,14 @@ class UAV(Agent):
                                     self.other_agent_pos[d_name] = np.array(pos)
                         elif topic == "FUTURE_POS" and self.swarm_active and not self.leader:
                             state = json.loads(json_str)
-                            self.future_state = state.get(self.name, None)
+                            mine = state.get(self.name)
+                            if mine is not None:  # never overwrite with None
+                                self.future_state = mine
                     except ValueError:
                         pass
             else:
                 buffer_remaining.append((target_time, msg))
-                # --- NOT READY YET: KEEP IT ---
-        
+
         # Replace buffer with remaining messages
         self.message_buffer = buffer_remaining
 
@@ -659,123 +758,89 @@ class UAV(Agent):
     # MAIN LOOP & LOGIC
     # -----------------------------------------------------------------------
     def think_and_act(self):
-        """
-        Perform a single simulation tick: update time, wind, control logic (100Hz), physics (240Hz), and optionally log state.
-        """
+        """One simulation step: wind, control (every ctrl_every steps), physics, log."""
         if not p.isConnected(self.physics_client_id):
             return
-        
-        # 1. Update Sim Time
-        self._sim_time += self.dt
 
-        # Wind simulation
+        # 1. Clock: integer count of physics steps
+        self._tick += 1
+        self._sim_time = self._tick * self.dt
+
         gt = self.get_ground_truth_state()
         h = gt["pos"][2]
-        v_airspeed = np.linalg.norm(gt["vel"] - self.current_wind)
+        # Wind: gusts oriented along the airspeed (relative to the mean wind)
+        v_air = np.asarray(gt["vel"], dtype=float) - self.wind_module.mean_wind
+        self.current_wind = self.wind_module.step(h, float(np.linalg.norm(v_air)), v_air, t=self._sim_time)
 
-        self.current_wind = self.wind_module.step(h, v_airspeed)
-        
-        # 2. Logic Schedule (100 Hz)
-        if (self._sim_time - self.last_ctrl_time) >= self.CTRL_DT:
+        # 2. Control loop, every ctrl_every steps
+        if (self._tick - 1) % self.ctrl_every == 0:  # steps 1, 1+n, 1+2n...
             self._update_control_loop(gt)
             self.last_ctrl_time = self._sim_time
-        
-        # 3. Physics Application (Always 240Hz)
-        # Use the last calculated RPMs to maintain stability
+
+        # 3. Physics, at every step
         self._apply_lib_physics(self.last_rpms, gt)
-        
-        # Logging (Optional: Log at physics freq or control freq)
-        if int(self._sim_time / self.dt) % 10 == 0:
+
+        # Main log every 10 steps
+        if self._tick % 10 == 0:
             self._log_full_state(gt)
 
     def _update_control_loop(self, gt):
-        """
-        High-Level Control Loop (100 Hz).
-        Orchestrates sensor fusion, state estimation, communication, planning, and motor control.
-        
-        **Sensor Fusion:**
-        - Processes noisy GNSS measurements with jittered update intervals
-        - EKF prediction using IMU acceleration and orientation
-        - Maintains corrected position and velocity estimates
-        
-        **Communication:**
-        - Broadcasts state to swarm at regular intervals
-        - Listens for swarm and radar messages
-        
-        **Target Logic:**
-        - Swarm Mode: Follows leader's predicted state
-        - Planning Mode: Decelerates during path calculation
-        - Autonomous Mode: Navigates waypoints via A* with replanning and failsafe
-        
-        **Collision Avoidance:**
-        - Computes repulsive forces from obstacles and neighbors
-        
-        **Control:**
-        - Generates motor RPMs via PID controller with target position, velocity, and yaw
-        
-        Args:
-            gt (dict): Ground truth state with pos, vel, orn_q, ang_vel
-        
-        Returns:
-            None (updates self.last_rpms)
-        """
-        
-        orn_q = np.array(gt["orn_q"])
+        """Control loop: IMU and GNSS, filter, communication, target selection, PID command."""
+
+        true_orn_q = np.array(gt["orn_q"])  # true attitude
         ang_vel = np.array(gt["ang_vel"])
+
+        # --- NAVIGATION ---
+
+        # Predict then update; the corrected state is published
+
+        # 1. IMU, over the real step since the last call
+        imu_dt = self._sim_time - self.last_ctrl_time
+        self._ctrl_elapsed = imu_dt
+        imu_acc, imu_gyro = self.imu.measure(gt["vel"], gt["orn_q"], ang_vel=gt["ang_vel"], dt=imu_dt)
+        self.last_imu_gyro = imu_gyro
+
+        # 2. Propagation (the ESKF propagates its own attitude, KF6 receives the true attitude)
+        if self.filter_type == "eskf":
+            self.ekf.predict(imu_acc, imu_gyro, dt=imu_dt)
+        else:
+            self.ekf.predict(imu_acc, self.imu.q_mid, dt=imu_dt)
+
+        # 3. GNSS correction; during an outage the filter continues in pure inertial mode
+        self._gnss_updated = False
+        if self._sim_time >= self.next_gnss_trigger:
+            meas_pos, meas_vel = self.gnss.measure(gt["pos"], gt["vel"], t=self._sim_time)
+            if meas_pos is not None:
+                self.last_gnss_meas_pos = np.array(meas_pos, dtype=np.float32)
+                self.last_gnss_meas_vel = np.array(meas_vel, dtype=np.float32)
+                # Accuracy reported by the receiver (jamming included)
+                self.ekf.update(
+                    meas_pos, meas_vel, pos_std=self.gnss.last_pos_std, vel_std=self.gnss.last_vel_std
+                )
+                self._gnss_updated = True
+                self._gnss_err = float(
+                    np.linalg.norm(np.asarray(meas_pos, dtype=float) - np.asarray(gt["pos"], dtype=float))
+                )
+
+            # Next measurement: periodic schedule + jitter, without accumulation
+            jitter = max(0.0, random.gauss(self.gnss_delay_mean, self.gnss_delay_std))
+            self.last_gnss_nominal_time += self.gnss_dt
+            self.next_gnss_trigger = self.last_gnss_nominal_time + jitter
+
+        # 4. Published estimated state (used by control and navigation)
+        pos = np.array(self.ekf.position, dtype=float)
+        vel = np.array(self.ekf.velocity, dtype=float)
+
+        # Attitude given to the inner loop
+        if self.attitude_source == "filter":
+            orn_q = np.array(self.ekf.attitude, dtype=float)
+        else:
+            orn_q = true_orn_q
         rpy = np.array(p.getEulerFromQuaternion(orn_q))
 
-        # ==================== ADVANCED SENSOR FUSION ====================
-        
-        # 1. Read Sensors (Noisy)
-        if (self._sim_time - self.last_gnss_update_time) >= self.gnss_dt:
-            meas_pos, meas_vel = self.gnss.measure(gt["pos"], gt["vel"])
-            self.ekf.update(meas_pos, meas_vel)
-            self.last_gnss_update_time = self._sim_time
-        
-        if self._sim_time >= self.next_gnss_trigger:
-            # 1. Measurement and EKF Update (unchanged)
-            meas_pos, meas_vel = self.gnss.measure(gt["pos"], gt["vel"])
-            self.ekf.update(meas_pos, meas_vel)
-    
-            # 2. Calculate next update time
-            # Keep the theoretical base stable (self.next_gnss_update_time + self.gnss_dt)
-            # Add jitter only for triggering
-    
-            # Example: +/- 10% variation on period
-            jitter = max(0, random.gauss(self.gnss_delay_mean, self.gnss_delay_std))
-    
-            # IMPORTANT: Increment theoretical target to avoid drift
-            # If we just did self._sim_time + dt, we'd accumulate noise delay.
-            # Here, we restart from the previous theoretical scheduled time.
-    
-            # If it's the first time or to reset the theoretical base 
-            # RECOMMENDED AND SIMPLER METHOD (No long-term drift):
-            # Update theoretical GNSS update time
-            self.last_gnss_update_time += self.gnss_dt
-    
-            # But next "check" will happen with an offset
-            self.next_gnss_trigger = self.last_gnss_update_time + jitter
-
-        # Read the IMU (Acceleration + Orientation)
-        # Note: In simple PyBullet, you can cheat and take gt['orn_q']
-        # or use self.imu.measure(...) if your IMU sensor is complete.
-        # Here I assume self.imu returns the raw accel.
-        imu_acc, _ = self.imu.measure(gt["vel"], gt["orn_q"]) 
-        # Note: Make sure your IMUSensor returns a np.array for imu_acc
-        
-        # 2. EKF Prediction (Based on IMU)
-        self.ekf.predict(imu_acc_body=imu_acc, orientation_quat=gt["orn_q"])
-        
-        # 3. EKF Correction (GPS)
-        # GPS corrects for IMU drift
-        pos = self.ekf.x[:3]
-        vel = self.ekf.x[3:6]
-
-        # --- SENSORS (Lidar) ---
-        if (self._sim_time - self.last_lidar_time) >= self.lidar_period:
-            self.last_lidar_time = self._sim_time
-            # new_pts = self.lidar.measure(pos, rpy[0], rpy[2], rpy[1])
-            # if len(new_pts) > 0: ...
+        # 5. Validation logs (filter, and truth for offline replay)
+        self._log_filter_state(gt)
+        self._log_truth(gt)
 
         # --- COMMUNICATION ---
         if self.swarm_active or self.leader:
@@ -784,57 +849,80 @@ class UAV(Agent):
                 self.broadcast_state(pos, vel)
 
         # Receive Messages
-        if self.sub_socket is not None: 
+        if self.sub_socket is not None:
             self.listen_swarm()
-        if self.radar_sub_socket is not None: 
+        if self.radar_sub_socket is not None:
             self.listen_radar()
 
         # --- TARGET LOGIC ---
-        target_pos = pos 
+        target_pos = pos
         target_vel = np.zeros(3)
-        
-        # 1. Swarm Follower
-        if self.swarm_active and not self.leader:          
-            target_pos = self.future_state["pos"]
-            if self.swarm_target_vel is not None:
-                target_vel = self.future_state["vel"]
+        if not self.is_planning and self.wp_idx < len(self.waypoints):
+            self._hold_pos = None  # hold point reset on the way
+
+        # 1. Follower: formation position and velocity setpoint
+        if self.swarm_active and not self.leader:
+            fs = self.future_state or {}
+            if fs.get("pos") is not None:
+                target_pos = np.asarray(fs["pos"], dtype=float)
+            if fs.get("vel") is not None:
+                target_vel = np.asarray(fs["vel"], dtype=float)
+                # Message received with delay: the target is extrapolated
+                if fs.get("t") is not None:
+                    age = float(np.clip(self._sim_time - float(fs["t"]), 0.0, 0.5))
+                    target_pos = target_pos + target_vel * age
 
         # 2. Planning (Wait)
         elif self.is_planning:
-            target_pos = pos 
-            target_vel = -1 * vel  # Brake
-            
+            # Waiting for the plan: hold position
+            if self._hold_pos is None:
+                self._hold_pos = np.array(pos, dtype=float)
+            target_pos = self._hold_pos
+
         # 3. Autonomous Navigation
         else:
             # --- FAILSAFE CHECK ---
             if self.calculation_fail_count > 5:
-                print(f"[{self.name}] ⚠️ Too many A* failures ({self.calculation_fail_count}). Skipping WP.")
+                print(f"[{self.name}] Too many A* failures ({self.calculation_fail_count}). Skipping WP.")
                 self.wp_idx += 1
                 self.calculation_fail_count = 0
                 self.replan_timer = 0
                 return  # Skip this cycle to reset logic
-            # ----------------------
 
             else:
                 # Detect arrival at Waypoint
                 if self.wp_idx < len(self.waypoints):
                     dist_wp = np.linalg.norm(self.waypoints[self.wp_idx] - pos)
-                    if dist_wp < 0.5 and not self.is_planning:
-                        print(f"[{self.name}] Waypoint {self.wp_idx} reached.")
+
+                    # Arrival: within tolerance, or waypoint approached then passed
+                    if self.wp_idx != self._wp_track_idx:
+                        self._wp_track_idx = self.wp_idx
+                        self._wp_min_dist = np.inf
+                    self._wp_min_dist = min(self._wp_min_dist, dist_wp)
+
+                    reached = dist_wp < self.wp_tol
+                    passed = (
+                        self._wp_min_dist < self.wp_capture and dist_wp > self._wp_min_dist + self.wp_hyst
+                    )
+
+                    if (reached or passed) and not self.is_planning:
+                        why = "reached" if reached else f"passed (closest {self._wp_min_dist:.2f} m)"
+                        print(f"[{self.name}] Waypoint {self.wp_idx} {why}.")
                         self.wp_idx += 1
+                        self._wp_min_dist = np.inf
                         self.active_path = []  # Force a new calculation
                         self.replan_timer = 0
+                        self.calculation_fail_count = 0  # counter specific to each WP
 
-                while self.wp_idx < len(self.waypoints):
-                    global_target = self.waypoints[self.wp_idx]
-                
-                    if len(self.active_path) == 0:
-                        # Force A* planning to trigger for each new WP
-                        if self.replan_timer <= 0:
-                            self._trigger_planning(pos, global_target)
-                            self.replan_timer = 100
-                        break 
-                    break
+                # A single A* computation per waypoint
+                if (
+                    self.wp_idx < len(self.waypoints)
+                    and len(self.active_path) == 0
+                    and self._plan_wp_idx != self.wp_idx
+                    and self.replan_timer <= 0
+                ):
+                    self._trigger_planning(pos, self.waypoints[self.wp_idx])
+                    self.replan_timer = self.replan_ticks
 
             # Follow Path
             if len(self.active_path) > 0:
@@ -846,117 +934,175 @@ class UAV(Agent):
                     elif self.wp_idx < len(self.waypoints):
                         local_target = self.waypoints[self.wp_idx]
                 target_pos = local_target
-                
+
             elif self.wp_idx < len(self.waypoints):
+                # No path: straight line to the waypoint
                 target_pos = self.waypoints[self.wp_idx]
-                if np.linalg.norm(target_pos - pos) < 0.3:
-                    print(f"[{self.name}] WP {self.wp_idx} Reached.")
-                    self.wp_idx += 1
+            else:
+                # Mission complete: hold on a fixed point
+                if self._hold_pos is None:
+                    self._hold_pos = np.array(pos, dtype=float)
+                target_pos = self._hold_pos
 
         if self.replan_timer > 0:
             self.replan_timer -= 1
 
         # --- CONTROL COMMANDS ---
         self.current_target_pos = target_pos
-        
+
         # Repulsive Force
         if self.environment == "generated":
-            f_rep = self._compute_repulsive_force(pos)    
-        if self.environment == "custom":
-            f_rep = self.planner.compute_repulsive_force(pos, self.safety_radius, self.max_repulsive_force, self.swarm_active, self.leader, self.other_agent_pos)
-        
-        acc_rep = f_rep / self.mass
+            f_rep = self._compute_repulsive_force(pos)
+        elif self.environment == "custom":
+            f_rep = self.planner.compute_repulsive_force(
+                pos,
+                self.safety_radius,
+                self.max_repulsive_force,
+                self.swarm_active,
+                self.leader,
+                self.other_agent_pos,
+            )
+            self.last_repulsive_force_mag = float(np.linalg.norm(f_rep))
+        else:
+            f_rep = np.zeros(3)
 
-        final_target_vel = target_vel + (acc_rep * 3 * self.CTRL_DT)  # Use CTRL_DT here
+        # Repulsive force converted into a velocity setpoint (gain in s)
+        acc_rep = f_rep / self.mass
+        final_target_vel = np.asarray(target_vel, dtype=float) + acc_rep * self.repulsion_gain_s
+
+        # Near the ground: reduced horizontal speed and tilt
+        self._ground_factor = float(
+            np.clip(
+                (float(pos[2]) - self.ground_min_alt)
+                / max(self.ground_clear_alt - self.ground_min_alt, 1e-3),
+                0.0,
+                1.0,
+            )
+        )
+        vmax_xy = self.max_speed * (
+            self.ground_speed_floor + (1.0 - self.ground_speed_floor) * self._ground_factor
+        )
 
         # Clamp Speed
         speed_xy = np.linalg.norm(final_target_vel[:2])
-        if speed_xy > self.max_speed:
-            ratio = self.max_speed / speed_xy
+        if speed_xy > vmax_xy:
+            ratio = vmax_xy / speed_xy
             final_target_vel[:2] *= ratio
-        
+
         # PID Target Helper
         final_target_pos = target_pos + (final_target_vel * self.CTRL_DT)
         vector_to_target = final_target_pos - pos
         dist_to_target = np.linalg.norm(vector_to_target)
-        if dist_to_target > 2.0:
-            virtual_target_pos = pos + (vector_to_target / dist_to_target) * 1.0
+        if dist_to_target > self.lookahead_m:
+            # Virtual target at most lookahead_m away
+            virtual_target_pos = pos + (vector_to_target / dist_to_target) * self.lookahead_m
         else:
             virtual_target_pos = final_target_pos
-        
+
+        # Thrust and tilt limits
+        virtual_target_pos, final_target_vel = self._limit_tilt_demand(
+            virtual_target_pos, final_target_vel, pos, vel
+        )
+
+        # Flip detection (true attitude)
+        tilt = float(
+            np.degrees(
+                np.arccos(
+                    np.clip(np.array(p.getMatrixFromQuaternion(true_orn_q)).reshape(3, 3)[2, 2], -1.0, 1.0)
+                )
+            )
+        )
+        if tilt > 90.0 and not self._loss_of_control:
+            self._loss_of_control = True
+            print(f"[{self.name}] Perte de controle a t={self._sim_time:.2f}s (inclinaison {tilt:.0f} deg)")
+
         # Yaw
         direction_vec = final_target_pos - pos
-        if self.swarm_active and self.swarm_target_yaw is not None:
-            self.target_yaw_cache = self.future_state["yaw"]
+        if (
+            self.swarm_active
+            and not self.leader
+            and self.future_state
+            and self.future_state.get("yaw") is not None
+        ):
+            self.target_yaw_cache = float(self.future_state["yaw"])
         elif np.linalg.norm(direction_vec[:2]) > 0.5:
             self.target_yaw_cache = np.arctan2(direction_vec[1], direction_vec[0])
 
+        # Rate-limited yaw setpoint (a yaw step saturates the motors)
+        dyaw = float(
+            np.arctan2(
+                np.sin(self.target_yaw_cache - self._yaw_cmd), np.cos(self.target_yaw_cache - self._yaw_cmd)
+            )
+        )
+        max_step = self.max_yaw_rate * self._ctrl_elapsed
+        self._yaw_cmd = float(
+            np.arctan2(
+                np.sin(self._yaw_cmd + np.clip(dyaw, -max_step, max_step)),
+                np.cos(self._yaw_cmd + np.clip(dyaw, -max_step, max_step)),
+            )
+        )
+
         state_vec = np.hstack([pos, orn_q, rpy, vel, ang_vel, self.last_rpms])
-        
+
         # Compute RPMs (PID)
         rpms, _, _ = self.ctrl.computeControlFromState(
-            control_timestep=self.CTRL_DT,  # Important: 0.01s
-            state=state_vec, 
-            target_pos=virtual_target_pos, 
-            target_vel=final_target_vel, 
-            target_rpy=np.array([0, 0, self.target_yaw_cache]) 
+            control_timestep=self._ctrl_elapsed,  # real step since the last call
+            state=state_vec,
+            target_pos=virtual_target_pos,
+            target_vel=final_target_vel,
+            target_rpy=np.array([0, 0, self._yaw_cmd]),
         )
-        
+
         self.last_rpms = rpms
-        
+
     def _apply_lib_physics(self, rpms, gt):
-        """
-        Apply physics simulation to the UAV using rotor RPM values.
-        Converts RPM to thrust forces and torques, applies them to the quadrotor,
-        and simulates aerodynamic drag accounting for wind effects.
-        
-        Parameters
-        ----------
-        rpms : array-like
-            Rotational speeds (RPM) of the four rotors, shape (4,)
-        gt : dict
-            Ground truth state with 'orn_q' (quaternion) and 'vel' (velocity)
-        """
+        """Rotor thrust and torque, aerodynamic drag on the airspeed."""
         rpms = np.clip(rpms, 0, self.MAX_RPM)
         forces = np.array(rpms**2) * self.KF
         torques = np.array(rpms**2) * self.KM
-        z_torque = (-torques[0] + torques[1] - torques[2] + torques[3])
+        z_torque = -torques[0] + torques[1] - torques[2] + torques[3]
 
         for i in range(4):
-            p.applyExternalForce(self.bodyId, i, forceObj=[0, 0, forces[i]], posObj=[0, 0, 0], flags=p.LINK_FRAME, physicsClientId=self.physics_client_id)
-        
-        try:
-            p.applyExternalTorque(self.bodyId, 4, [0, 0, z_torque], p.LINK_FRAME)
-            rot = np.array(p.getMatrixFromQuaternion(gt["orn_q"])).reshape(3, 3)
-            v_air_world = gt["vel"] - self.current_wind
-            v_air_body = rot.T @ v_air_world
-            prop_wash_factor = np.sum(2 * np.pi * rpms / 60)
-            drag_force_body = -1 * self.DRAG_COEFF * prop_wash_factor * v_air_body
-            f_drag_for_bullet = rot @ drag_force_body 
-            p.applyExternalForce(self.bodyId, -1, forceObj=f_drag_for_bullet, posObj=[0, 0, 0], flags=p.LINK_FRAME, physicsClientId=self.physics_client_id)
-        except:
-            pass 
+            p.applyExternalForce(
+                self.bodyId,
+                i,
+                forceObj=[0, 0, forces[i]],
+                posObj=[0, 0, 0],
+                flags=p.LINK_FRAME,
+                physicsClientId=self.physics_client_id,
+            )
+
+        p.applyExternalTorque(
+            self.bodyId, 4, [0, 0, z_torque], p.LINK_FRAME, physicsClientId=self.physics_client_id
+        )
+
+        # Drag (gym-pybullet-drones model), in the body frame, on the airspeed
+        rot = np.array(p.getMatrixFromQuaternion(gt["orn_q"])).reshape(3, 3)
+        v_air_body = rot.T @ (np.asarray(gt["vel"], dtype=float) - self.current_wind)
+        prop_wash_factor = np.sum(2 * np.pi * rpms / 60)
+        drag_force_body = -self.DRAG_COEFF * prop_wash_factor * v_air_body
+        p.applyExternalForce(
+            self.bodyId,
+            -1,
+            forceObj=drag_force_body.tolist(),
+            posObj=[0, 0, 0],
+            flags=p.LINK_FRAME,
+            physicsClientId=self.physics_client_id,
+        )
 
     def _log_full_state(self, gt):
-        """
-        Log the complete state of the UAV to a CSV file.
-        Logs ground truth position and velocity, measured position with GNSS error,
-        current wind conditions, repulsive forces, nearest neighbor distance, target
-        tracking information, and collision status.
-        :param self: The UAV instance
-        :param gt: Dictionary containing ground truth data with keys 'pos' (position) 
-                   and 'vel' (velocity)
-        :return: None
-        """
+        """Append a row to the main log <name>.csv."""
         # Detect collision (simple proximity check for log flag)
         collision_flag = 0
         if len(p.getContactPoints(self.bodyId)) > 0:
             collision_flag = 1
-        
-        meas_pos = self.ekf.x[:3]
-        
+
+        meas_pos = np.array(self.last_gnss_meas_pos, dtype=np.float32)
+        ekf_pos = np.array(self.ekf.x[:3], dtype=np.float32)
+
         # Derived metrics
         gnss_error = np.linalg.norm(np.array(meas_pos) - np.array(gt["pos"]))
+        ekf_error = np.linalg.norm(np.array(ekf_pos) - np.array(gt["pos"]))
         wind_mag = np.linalg.norm(self.current_wind)
         tracking_error = np.linalg.norm(np.array(gt["pos"]) - np.array(self.current_target_pos))
 
@@ -964,10 +1110,13 @@ class UAV(Agent):
             row = [
                 round(self._sim_time, 3),
                 # Ground Truth
-                *gt["pos"], *gt["vel"],
+                *gt["pos"],
+                *gt["vel"],
                 # Sensors
                 *meas_pos,
                 gnss_error,
+                *ekf_pos,
+                ekf_error,
                 # Environment
                 *self.current_wind,
                 wind_mag,
@@ -977,7 +1126,7 @@ class UAV(Agent):
                 # Intent
                 *self.current_target_pos,
                 tracking_error,
-                collision_flag
+                collision_flag,
             ]
             # Clean float formatting
             row = [x if isinstance(x, (int, str)) else round(float(x), 4) for x in row]
