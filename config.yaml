@@ -1,5 +1,5 @@
 #===============================================================
-# CONFIGURATION PRINCIPALE DU SIMULATEUR
+# MAIN SIMULATOR CONFIGURATION
 #===============================================================
 simulation:
   connect_mode: "gui"
@@ -42,7 +42,6 @@ agents:
     sensors:
       gnss: {enabled: true, position_noise_std: 0.1, velocity_noise_std: 0.05,frequency: 10, delay_mean: 0.1,delay_std: 0.01}
       imu: {enabled: true, accel_noise_std: 0.3, gyro_noise_std: 0.03, gravity: 9.81}
-      lidar: {enabled: true, max_distance: 20.0, angle_resolution: 4.0, fov_horizontal: 90.0, fov_vertical: 30.0, frequency: 10.0}
     wind: {wind_mean: [0,0,0], turbulence: 10}
     radar : 
       - name: "Radar_Alpha"
@@ -50,14 +49,14 @@ agents:
         ip : "localhost"
         pos: [0,0,0]
 
-  #------------------- SUIVEURS (Décalés pour éviter la Sphère à -2,1) ------------------------
+  #------------------- FOLLOWERS ------------------------
   - type: "uav"
     name: "drone_1"
     swarm_id: "A"
     urdf_path: "assets/quadrotor.urdf"
     body_id: 0001
     mass: 0.027
-    start_pos: [-0.5, -0.5, 0.0] 
+    start_pos: [-1, -1, 0.0] 
     start_orn_euler: [0.0, 0.0, 0.0]
     waypoints: []
     ctrl_freq: 80
@@ -66,7 +65,6 @@ agents:
     sensors:
       gnss: {enabled: true, position_noise_std: 0.1, velocity_noise_std: 0.05,frequency: 10, delay_mean: 0.1,delay_std: 0.01}
       imu: {enabled: true, accel_noise_std: 0.3, gyro_noise_std: 0.03, gravity: 9.81}
-      lidar: {enabled: true, max_distance: 20.0, angle_resolution: 4.0, fov_horizontal: 90.0, fov_vertical: 30.0, frequency: 10.0}
     wind: {wind_mean: [0,0,0], turbulence: 10}
     radar : 
       - name: "Radar_Alpha"
@@ -80,7 +78,7 @@ agents:
     urdf_path: "assets/quadrotor.urdf"
     body_id: 0002
     mass: 0.027
-    start_pos: [-0.5, 0.5, 0.0] 
+    start_pos: [-1, 1, 0.0] 
     start_orn_euler: [0.0, 0.0, 0.0]
     waypoints: []
     ctrl_freq: 80
@@ -89,7 +87,6 @@ agents:
     sensors:
       gnss: {enabled: true, position_noise_std: 0.1, velocity_noise_std: 0.05,frequency: 10, delay_mean: 0.1,delay_std: 0.01}
       imu: {enabled: true,accel_noise_mean: 0.5, accel_noise_std: 0.3, gyro_noise_std: 0.03, gravity: 9.81}
-      lidar: {enabled: true, max_distance: 20.0, angle_resolution: 4.0, fov_horizontal: 90.0, fov_vertical: 30.0, frequency: 10.0}
     wind: {wind_mean: [0,0,0], turbulence: 10}
     radar : 
       - name: "Radar_Alpha"
@@ -97,13 +94,13 @@ agents:
         ip : "localhost"
         pos: [0,0,0]
 
-
+  #------------------- INDEPENDENT DRONE ------------------------
   - type: "uav"
     name: "drone_3"
     urdf_path: "assets/quadrotor.urdf"
     body_id: 0003
     mass: 0.027
-    start_pos: [-1.0, 0.0, 0.0]
+    start_pos: [-2.0, 0.0, 0.0]
     start_orn_euler: [0.0, 0.0, 0.0]
     waypoints: [[-5.0,0,0],[-5.0,0,10]]
     safety_radius: 0.35
@@ -114,7 +111,6 @@ agents:
     sensors:
       gnss: {enabled: true, position_noise_std: 0.1, velocity_noise_std: 0.05,frequency: 10, delay_mean: 0.1,delay_std: 0.01}
       imu: {enabled: true, accel_noise_std: 0.3, gyro_noise_std: 0.03, gravity: 9.81}
-      lidar: {enabled: true, max_distance: 20.0, angle_resolution: 4.0, fov_horizontal: 90.0, fov_vertical: 30.0, frequency: 10.0}
     wind: {wind_mean: [0,0,0], turbulence: 10}
     radar : 
       - name: "Radar_Alpha"
@@ -122,7 +118,7 @@ agents:
         ip : "localhost"
         pos: [0,0,0]
 
-
+  #------------------- RADAR ------------------------
   - name: "Radar_Alpha"
     type: "radar"
     pos: [3, 3, 0]      
