@@ -1,5 +1,6 @@
 # simulator/simulator_manager.py
 import time
+import random
 import numpy as np
 import pybullet as p
 import pybullet_data
@@ -8,45 +9,29 @@ from environment.world import World
 from entities.uav import UAV
 from swarm.swarm import Swarm
 from entities.static_sensor import RadarStation
-from Control.Path_planning import HeightmapAStar 
+from Control.Path_planning import HeightmapAStar
+
 
 class SimulationManager:
-    """SimulationManager
-    Orchestrates a PyBullet-based multi-agent simulation with UAVs and radar stations.
-    Responsibilities:
-        - Establish connection to PyBullet physics engine (GUI or DIRECT mode)
-        - Initialize simulation world (ground plane, obstacles, buildings)
-        - Load scenario configuration (agents, objectives, obstacles)
-        - Create and manage UAVs and RadarStation agents
-        - Instantiate swarms with leader-follower dynamics if enabled
-        - Execute main simulation loop with physics stepping and agent control
-        - Handle resource cleanup and disconnection
-    Attributes:
-        config (dict): Complete simulation configuration from config.yaml
-        dt (float): Physics simulation timestep (seconds)
-        physics_client_id (int): PyBullet client identifier
-        world (World): PyBullet world manager handling ground and obstacles
-        agents (list[UAV | RadarStation]): All active agents in the simulation
-        swarms (list[Swarm]): Swarm formations with leader-follower behavior
-        radars (list[RadarStation]): Dedicated reference to radar agents
-        planner (HeightmapAStar): Path planning algorithm using heightmap from buildings
-        obstacles_config (dict): Configuration for world obstacles and buildings
-    Methods:
-        load_scenario(): Initialize agents, obstacles, and objectives from config
-        _create_swarm_from_config(): Instantiate swarm formation if enabled
-        run(): Main simulation loop (physics stepping + agent control)
-        stop(): Cleanup and disconnect from PyBullet
-    Configuration:
-        Requires config dict with sections: simulation, physics, world, agents, objectives, swarm
-        Supports both indexed (int) and named (str) agent references in objectives
-    """
-
+    """PyBullet connection, world, drones, radars and swarms, then the simulation loop."""
 
     def __init__(self, config: dict):
         self.config = config
         self.dt = float(self.config["simulation"]["dt"])
-        # 1. Connexion PyBullet
+
+        # Reproducibility (set simulation.seed in config.yaml)
+        sim_cfg = self.config.get("simulation", {})
+        simulation_seed = sim_cfg.get("seed", None)
+        if simulation_seed is not None:
+            try:
+                simulation_seed = int(simulation_seed)
+                random.seed(simulation_seed)
+                np.random.seed(simulation_seed)
+            except Exception:
+                pass
+        # 1. PyBullet connection
         mode_str = str(self.config["simulation"]["connect_mode"]).strip().lower()
+        self.realtime = bool(self.config.get("simulation", {}).get("realtime", mode_str == "gui"))
         mode = p.GUI if mode_str == "gui" else p.DIRECT
         self.physics_client_id = p.connect(mode)
         if self.physics_client_id < 0:
@@ -54,13 +39,15 @@ class SimulationManager:
 
         print(f"Connecté à PyBullet, client_id={self.physics_client_id}")
 
+        # Physics integration step = simulation.dt (PyBullet uses 1/240 s by default)
+        p.setTimeStep(self.dt, physicsClientId=self.physics_client_id)
         p.setAdditionalSearchPath(pybullet_data.getDataPath())
         p.setGravity(
             *self.config["physics"]["gravity"],
             physicsClientId=self.physics_client_id,
         )
 
-        # 2. Monde (sol + obstacles)
+        # 2. World (ground + obstacles)
         self.world = World(self.physics_client_id)
 
         if mode == p.GUI:
@@ -72,57 +59,61 @@ class SimulationManager:
                 physicsClientId=self.physics_client_id,
             )
 
-        # Liste de tous les agents (UAV + radars)
+        # List of all agents (UAVs + radars)
         self.agents: list[UAV | RadarStation] = []
 
-        # Liste des essaims (on n'en crée qu'un, mais on garde une liste)
+        # List of swarms (only one is created, but a list is kept)
         self.swarms: list[Swarm] = []
-        
-        # Liste des radars
+
+        # List of radars
         self.radars: list[RadarStation] = []
-        
-        # 3. Charger scénario (obstacles + drones + objectifs éventuels)
+
+        # 3. Load the scenario (obstacles + drones + optional objectives)
         self.load_scenario()
 
-        # 4. Créer un essaim si demandé dans la config
+        # 4. Create a swarm if the config asks for it
         self._create_swarm_from_config()
 
     # ------------------------------------------------------------------
     def load_scenario(self):
         print("Chargement du scénario...")
-        
+
         self.obstacles_config = self.config.get("world", {})
         print(self.obstacles_config)
         # Obstacles
-        res=self.obstacles_config.get("res",0.25)
-        world_type = self.obstacles_config.get("type","city")
+        res = self.obstacles_config.get("res", 0.25)
+        world_type = self.obstacles_config.get("type", "generated")
+        if world_type not in ("generated", "custom"):
+            raise ValueError(f"world.type inconnu : {world_type!r} (attendu 'generated' ou 'custom')")
+        obstacles = []
+        self.planner = None
         if world_type == "generated":
-            """Charge le sol + règle la physique."""
-            obstacles=self.world.generate_city_urdf(self.obstacles_config.get("city",{}))
+            """Load the ground and set up the physics."""
+            obstacles = self.world.generate_city_urdf(self.obstacles_config.get("city", {}))
 
             p.loadURDF(
-            "assets/city.urdf",  # <--- Votre nouveau fichier
-            basePosition=[0, 0, 0],
-            useFixedBase=1,
-            physicsClientId=self.physics_client_id,
+                self.world.city_urdf_path,  # file specific to this process
+                basePosition=[0, 0, 0],
+                useFixedBase=1,
+                physicsClientId=self.physics_client_id,
             )
             self.planner = HeightmapAStar(
-            self.obstacles_config.get("Astar",{}),
-            resolution=res, 
+                self.obstacles_config.get("Astar", {}),
+                resolution=res,
             )
             self.planner.build_from_buildings(obstacles)
-        
+
         if world_type == "custom":
             world_file = self.obstacles_config.get("filename")
             p.loadURDF(
-            world_file,  # <--- Votre nouveau fichier
-            basePosition=[0, 0, 0],
-            useFixedBase=1,
-            physicsClientId=self.physics_client_id,
+                world_file,
+                basePosition=[0, 0, 0],
+                useFixedBase=1,
+                physicsClientId=self.physics_client_id,
             )
             self.planner = HeightmapAStar(
-            self.obstacles_config.get("Astar",{}),
-            resolution=res, 
+                self.obstacles_config.get("Astar", {}),
+                resolution=res,
             )
             self.planner.custom_heightmap()
         # Drones
@@ -131,14 +122,13 @@ class SimulationManager:
         if isinstance(self.config, dict):
             sim_log_dir = self.config.get("simulation", {}).get("log_dir", None)
         for agent_cfg in self.config.get("agents", []):
-
             # Propagate global log directory to each UAV config (if provided)
             if sim_log_dir and isinstance(agent_cfg, dict) and agent_cfg.get("type") == "uav":
                 agent_cfg["log_dir"] = sim_log_dir
-            
+
             if agent_cfg.get("type") == "radar":
                 radar = RadarStation(config=agent_cfg, physics_client_id=self.physics_client_id, dt=self.dt)
-                self.agents.append(radar) # On l'ajoute à la boucle principale pour le think_and_act
+                self.agents.append(radar)  # Added to the main loop for think_and_act
                 self.radars.append(radar)
 
             elif agent_cfg.get("type") == "uav":
@@ -148,20 +138,18 @@ class SimulationManager:
                     dt=self.dt,
                     known_obstacles_config=obstacles,
                     planner=self.planner,
-                    world_type = world_type
+                    world_type=world_type,
                 )
                 self.agents.append(uav)
 
         for radar in self.radars:
             radar.targets = [a for a in self.agents if isinstance(a, UAV)]
-        # Objectifs (ancienne mécanique, on la garde pour compatibilité)
+        # Optional objectives from the YAML (`objectives` section)
         for objective in self.config.get("objectives", []):
             agent_id = objective.get("agent")
             if objective.get("type") == "reach_position":
                 if agent_id is None:
-                    raise ValueError(
-                        "Objective of type 'reach_position' is missing 'agent'."
-                    )
+                    raise ValueError("Objective of type 'reach_position' is missing 'agent'.")
                 setpoint = np.array(
                     objective.get("target_pos", [0.0, 0.0, 0.0]),
                     dtype=float,
@@ -178,13 +166,11 @@ class SimulationManager:
                         elif hasattr(agent, "set_target"):
                             agent.set_target(setpoint)
                         else:
-                            setattr(agent, "target_pos", setpoint)
+                            agent.target_pos = setpoint
                     else:
-                        raise ValueError(
-                            f"Agent index {agent_id} out of range for objective."
-                        )
+                        raise ValueError(f"Agent index {agent_id} out of range for objective.")
                 else:
-                    # agent_id est un nom
+                    # agent_id is a name
                     found = False
                     for agent in self.agents:
                         if getattr(agent, "name", None) == agent_id:
@@ -195,44 +181,39 @@ class SimulationManager:
                             elif hasattr(agent, "set_target"):
                                 agent.set_target(setpoint)
                             else:
-                                setattr(agent, "target_pos", setpoint)
+                                agent.target_pos = setpoint
                             found = True
                             break
                     if not found:
-                        raise ValueError(
-                            f"No agent with name '{agent_id}' found for objective."
-                        )
+                        raise ValueError(f"No agent with name '{agent_id}' found for objective.")
 
-        print(
-            f"Scénario chargé : {len(self.agents)} drones, "
-            f"{len(self.world.obstacle_ids)} obstacles."
-        )
+        print(f"Scénario chargé : {len(self.agents)} drones, {len(self.world.obstacle_ids)} obstacles.")
 
     # ------------------------------------------------------------------
     def _create_swarm_from_config(self):
         """
-        Crée les essaims en associant les drones par 'swarm_id' 
-        et en appliquant la config spécifique définie dans le YAML.
+        Create the swarms by grouping drones by 'swarm_id'
+        and applying the specific config defined in the YAML.
         """
-        # 1. Chargement des configs d'essaims (YAML)
-        # Le YAML est une liste : [{id: "A", ...}, {id: "B", ...}]
+        # 1. Load the swarm configs (YAML)
+        # The YAML is a list: [{id: "A", ...}, {id: "B", ...}]
         raw_swarm_configs = self.config.get("swarm", [])
-        
-        # On convertit en dictionnaire pour accès rapide : { "A": {config}, "B": {config} }
+
+        # Converted to a dict for fast access: { "A": {config}, "B": {config} }
         swarm_configs_map = {}
         if isinstance(raw_swarm_configs, list):
             for cfg in raw_swarm_configs:
                 sid = str(cfg.get("id"))
                 swarm_configs_map[sid] = cfg
         elif isinstance(raw_swarm_configs, dict):
-            # Cas où il n'y a qu'un seul essaim défini sans tiret
+            # Case where a single swarm is defined without a dash
             sid = str(raw_swarm_configs.get("id", "default"))
             swarm_configs_map[sid] = raw_swarm_configs
 
-        # 2. Regroupement des Drones (Code existant)
+        # 2. Group the drones
         swarms_groups = {}
         uavs = [a for a in self.agents if isinstance(a, UAV)]
-        
+
         for uav in uavs:
             s_id = uav.config.get("swarm_id", None)
             if s_id is not None:
@@ -241,7 +222,7 @@ class SimulationManager:
                     swarms_groups[s_id] = []
                 swarms_groups[s_id].append(uav)
 
-        # 3. Création des objets Swarm
+        # 3. Create the Swarm objects
         if not swarms_groups:
             print("[Swarm] Aucun 'swarm_id' trouvé sur les drones.")
             return
@@ -251,72 +232,100 @@ class SimulationManager:
                 print(f"[Swarm] Groupe '{s_id}' : Trop petit (<2). Ignoré.")
                 continue
 
-            # --- ICI EST LA CORRECTION ---
-            # On récupère la config spécifique à cet ID (ex: "A")
-            # Si pas de config trouvée dans 'swarm:', on utilise {} (valeurs par défaut)
+            # Config of this swarm in 'swarm:' (defaults otherwise)
             specific_cfg = swarm_configs_map.get(s_id, {})
 
             print(f"[Swarm] Création groupe '{s_id}' avec config : {specific_cfg}")
 
-            # Extraction des paramètres spécifiques
-            leader_name = specific_cfg.get("leader", None) # Le nom du drone leader
+            # Extract the specific parameters
+            leader_name = specific_cfg.get("leader", None)  # Name of the leader drone
             min_sep = float(specific_cfg.get("min_sep", 0.6))
             avoid_gain = float(specific_cfg.get("avoid_gain", 0.5))
-            
-            # Paramètres Réseau
+
+            # Network parameters
             port_in = int(specific_cfg.get("port_in", 5556))
             port_out = int(specific_cfg.get("port_out", 5557))
             ip = specific_cfg.get("ip", "localhost")
 
-            # Création de l'instance
+            # Create the instance
             new_swarm = Swarm(
                 agents=members,
                 leader_name=leader_name,
-                formation_body_offsets = None,
+                formation_body_offsets=None,
                 min_sep=min_sep,
                 avoid_gain=avoid_gain,
                 port_in=port_in,
                 port_out=port_out,
-                ip=ip
+                ip=ip,
             )
             self.swarms.append(new_swarm)
-        
 
     # ------------------------------------------------------------------
     def run(self):
         """
-        Boucle principale de simulation.
+        Main simulation loop.
         """
         sim_time = 0.0
         max_time = float(self.config["simulation"]["max_sim_time"])
 
         while sim_time < max_time and p.isConnected(self.physics_client_id):
-            # 1. Mise à jour des essaims (leader/followers) si activés
+            # 1. Update the swarms (leader/followers) if enabled
             for swarm in self.swarms:
                 swarm.update()
 
-            # 2. Contrôle de chaque drone
+            # 2. Control of each drone
             for agent in self.agents:
-                if agent.type=="uav":
+                if agent.type == "uav":
                     agent.think_and_act()
 
-                elif agent.type=="radar":
+                elif agent.type == "radar":
                     if sim_time > agent.radar_period + agent.radar_last_time:
                         agent.radar_last_time = sim_time
                         agent.think_and_act(sim_time)
-            # 3. Avancer la physique
+            # 3. Step the physics
             p.stepSimulation(physicsClientId=self.physics_client_id)
 
             # 4. Real time
-            time.sleep(self.dt)
+            if self.realtime:
+                time.sleep(self.dt)
             sim_time += self.dt
 
     # ------------------------------------------------------------------
     def stop(self):
+        # Write the logs held in memory, even if the simulation was interrupted
+        for agent in self.agents:
+            if hasattr(agent, "close_logs"):
+                try:
+                    agent.close_logs()
+                except Exception as exc:
+                    print(f"[stop] journaux de {getattr(agent, 'name', '?')} : {exc}")
         if p.isConnected(self.physics_client_id):
             print("Déconnexion de PyBullet.")
             p.disconnect(self.physics_client_id)
-            for swarm in self.swarms:
-                swarm.cleanup()
+        # Swarm cleanup (proxy and ZMQ sockets), even if the window is closed
+        for swarm in self.swarms:
+            swarm.cleanup()
+        # ZMQ sockets of drones and radars
+        for agent in self.agents:
+            for attr in ("sub_socket", "pub_socket", "radar_sub_socket"):
+                sock = getattr(agent, attr, None)
+                if sock is not None:
+                    try:
+                        sock.close(linger=0)
+                    except Exception:
+                        pass
+            ctx = getattr(agent, "zmq_ctx", None)
+            if ctx is not None:
+                try:
+                    ctx.term()
+                except Exception:
+                    pass
+        # Temporary city URDF file
+        path = getattr(self.world, "city_urdf_path", None)
+        if path:
+            try:
+                import os
 
-    
+                os.remove(path)
+            except OSError:
+                pass
