@@ -42,6 +42,9 @@ correlated); the verdict uses a ±25 % tolerance around the expected value.
 
 ## Results (24 flights × 30 s, 4 drones)
 
+GNSS is RTK-grade in `config.yaml`: σ = 10 cm on position, 5 cm/s on velocity, 10 Hz.
+With a standard metre-level receiver, the absolute errors below would not hold.
+
 | Filter | Successful flights | Position RMSE | Gain vs GNSS | NEES pos-vel (expected 6) | NIS (expected 6) | Outside 3σ |
 |---|---|---|---|---|---|---|
 | ESKF, 15 states | 96/96 | 0.038–0.040 m | 4.4–4.6× | 5.80–6.11 | 5.95–6.03 | 0.19–0.33 % |

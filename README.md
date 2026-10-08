@@ -3,23 +3,31 @@
 ![python](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue)
 
 A PyBullet simulator of a quadrotor swarm (leader–followers + an independent
-drone) flying through a generated city, with realistic GNSS/IMU sensors, a
-**15-state error-state Kalman filter**, and a **causal analysis** that explains
-why drones fail, validated against controlled interventions.
+drone) flying through a generated city, with GNSS/IMU sensor models
+(**RTK-grade GNSS, σ = 10 cm**), a **15-state error-state Kalman filter**, and a
+**causal analysis** that explains why drones fail, validated against controlled
+interventions.
 
 Started as a 5-month research internship at the **Autonomous and Intelligent
 Systems Lab, KAIST** (Prof. Hyo-Sang Shin, 2025–2026), as a team of two
 ISAE-Supméca students; extended afterwards (navigation filter, statistical
 validation, causal verification). See [who did what](#who-did-what).
 
+Published with the agreement of the KAIST AIS Lab, Prof. Hyo-Sang Shin and the
+supervising professors at ISAE-Supméca.
+
 ## Key results
 
 | | |
 |---|---|
-| **Navigation filter** | ESKF consistent on 24 Monte-Carlo flights × 4 drones: NEES 5.8–6.1 (expected 6), NIS 5.95–6.03 (expected 6), position RMSE 3.8–4.0 cm, about 4.5× better than raw GNSS |
+| **Navigation filter** | ESKF consistent on 24 Monte-Carlo flights × 4 drones: NEES 5.8–6.1 (expected 6), NIS 5.95–6.03 (expected 6), position RMSE 3.8–4.0 cm with RTK-grade GNSS (σ = 10 cm), about 4.5× better than the raw fixes |
 | **Accelerometer bias** | drone_2 has a 0.5 m/s² accelerometer offset: the ESKF estimates it and stays consistent, the 6-state baseline becomes 3× less accurate and over-confident (NEES 55.9 instead of 6) |
 | **GNSS outage (10 s)** | with a BMI088-class MEMS IMU, the ESKF drifts 2.9 m (median) and stays inside its 3σ envelope; the 6-state filter, even given the true attitude, drifts 4.4 m and its 95th-percentile error reaches 1.7× its own envelope: it can be wrong without knowing it |
 | **Causal analysis** | in replayed flights with one injected perturbation, the analysis blames the right drone and the right cause: GNSS jamming of drone_1 → GNSS blamed for 89 % of its navigation-loss onsets and 57 % of its formation-loss onsets; wind burst on drone_2 → wind cited for drone_2 only (17 % of its formation-loss onsets: wind mostly makes failures last longer); no false attribution in nominal flights. Percentages are indicative, not calibrated |
+
+All results use RTK-grade GNSS (σ = 10 cm on position, 5 cm/s on velocity, see
+`config.yaml`). A standard receiver is accurate to about a metre: the
+centimetre-level RMSE follows from this setting and does not carry over to it.
 
 ### GNSS outage: drift and integrity
 
