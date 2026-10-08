@@ -19,7 +19,7 @@ if _REPO not in sys.path:
 
 from utilities import quaternion as Q  # noqa: E402
 from entities.sensor import IMUSensor, GNSSensor  # noqa: E402
-from Control.EKF import INSGNSSFilter  # noqa: E402
+from Control.kf6 import INSGNSSFilter  # noqa: E402
 from Control.ESKF import ESKF  # noqa: E402
 
 # config_biais: config.yaml noise + turn-on biases; mems_nav: consumer MEMS of the BMI088 class (the Crazyflie's IMU)
@@ -81,7 +81,7 @@ def load_truth(csv_path: str):
 
 def make_filter(kind: str, dt: float, imu_cfg: dict, gnss_cfg: dict, filter_cfg: dict | None = None):
     kind = kind.lower()
-    if kind in ("kf6", "kf", "ekf", "insgnss"):
+    if kind in ("kf6", "kf", "insgnss"):
         return INSGNSSFilter(dt, gnss_config=gnss_cfg, imu_config=imu_cfg, config=filter_cfg)
     if kind == "eskf":
         return ESKF(dt, gnss_config=gnss_cfg, imu_config=imu_cfg, config=filter_cfg)

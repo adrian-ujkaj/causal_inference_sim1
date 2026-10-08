@@ -169,7 +169,7 @@ def _write_run(d, lg):
                 "wind_y": 0.0,
                 "wind_z": 0.0,
                 "collision_flag": 0,
-                "ekf_pos_error_mag": lg.data["nav_err"][:, i],
+                "est_pos_error_mag": lg.data["nav_err"][:, i],
                 "gnss_error_mag": 0.0,
             }
         )

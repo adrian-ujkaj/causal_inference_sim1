@@ -2,7 +2,7 @@
 
 ## Filters
 
-| | 15-state ESKF (`Control/ESKF.py`, default) | 6-state filter (`Control/EKF.py`, baseline) |
+| | 15-state ESKF (`Control/ESKF.py`, default) | 6-state linear Kalman filter (`Control/kf6.py`, baseline) |
 |---|---|---|
 | State | position, velocity, attitude, accelerometer bias, gyro bias | position, velocity |
 | Attitude | estimated (error-state on SO(3), quaternion nominal state) | **true attitude given** by the simulator |

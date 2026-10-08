@@ -199,7 +199,7 @@ def load_run(run_dir: str, downsample: int = 1) -> SwarmLogs:
             yaw[:, i] = yaw_from_quat(q)
 
     if np.isnan(nav).all():
-        nav = cols("ekf_pos_error_mag")
+        nav = cols("est_pos_error_mag")
         notes.append("journal du filtre absent : erreur de navigation lue dans le journal principal")
     if np.isnan(gnss).all():
         gnss = cols("gnss_error_mag")

@@ -10,7 +10,7 @@ import random
 # Utility Imports & Control
 from entities.agent import Agent
 from entities.sensor import GNSSensor, IMUSensor
-from Control.EKF import INSGNSSFilter
+from Control.kf6 import INSGNSSFilter
 from Control.ESKF import ESKF
 from utilities import quaternion as Q
 from utilities.csv_buffer import CsvBuffer
@@ -200,10 +200,10 @@ class UAV(Agent):
         start_yaw = float(config.get("start_orn_euler", [0, 0, 0])[2])
         fcfg.setdefault("initial_yaw", start_yaw)
         FilterClass = ESKF if self.filter_type == "eskf" else INSGNSSFilter
-        self.ekf = FilterClass(
+        self.nav_filter = FilterClass(
             self.CTRL_DT, gnss_config=sens.get("gnss", {}), imu_config=sens.get("imu", {}), config=fcfg
         )
-        self.ekf.init_state(self.start_pos, np.zeros(3))
+        self.nav_filter.init_state(self.start_pos, np.zeros(3))
 
         # Attitude used by the inner loop: "truth" (default) or "filter" (ESKF)
         self.attitude_source = str(fcfg.get("attitude_source", "truth")).lower()
@@ -276,10 +276,10 @@ class UAV(Agent):
                     "meas_y",
                     "meas_z",  # Sensors
                     "gnss_error_mag",
-                    "ekf_x",
-                    "ekf_y",
-                    "ekf_z",
-                    "ekf_pos_error_mag",
+                    "est_x",
+                    "est_y",
+                    "est_z",
+                    "est_pos_error_mag",
                     "wind_x",
                     "wind_y",
                     "wind_z",  # Environment
@@ -350,18 +350,18 @@ class UAV(Agent):
         nan3 = [np.nan] * 3
         ba_true = self.imu.accel_error_det
         bg_true = self.imu.gyro_error_det
-        if isinstance(self.ekf, ESKF):
+        if isinstance(self.nav_filter, ESKF):
             # error_vector returns true - estimated: flip the sign
-            e = -self.ekf.error_vector(gt["pos"], gt["vel"], gt["orn_q"], ba_true, bg_true)
-            sig = self.ekf.sigmas()
-            nees_pv, nees_full = self.ekf.nees(gt["pos"], gt["vel"], gt["orn_q"], ba_true, bg_true)
-            ba, bg = list(self.ekf.ba), list(self.ekf.bg)
+            e = -self.nav_filter.error_vector(gt["pos"], gt["vel"], gt["orn_q"], ba_true, bg_true)
+            sig = self.nav_filter.sigmas()
+            nees_pv, nees_full = self.nav_filter.nees(gt["pos"], gt["vel"], gt["orn_q"], ba_true, bg_true)
+            ba, bg = list(self.nav_filter.ba), list(self.nav_filter.bg)
         else:
-            e = np.r_[np.asarray(self.ekf.x[:6]) - np.r_[gt["pos"], gt["vel"]], [np.nan] * 9]
-            sig = np.r_[self.ekf.sigmas(), [np.nan] * 9]
-            nees_pv, nees_full = self.ekf.nees(gt["pos"], gt["vel"]), np.nan
+            e = np.r_[np.asarray(self.nav_filter.x[:6]) - np.r_[gt["pos"], gt["vel"]], [np.nan] * 9]
+            sig = np.r_[self.nav_filter.sigmas(), [np.nan] * 9]
+            nees_pv, nees_full = self.nav_filter.nees(gt["pos"], gt["vel"]), np.nan
             ba, bg = nan3, nan3
-        nis = self.ekf.last_nis if self._gnss_updated else np.nan
+        nis = self.nav_filter.last_nis if self._gnss_updated else np.nan
 
         buf.write(
             [f"{self._sim_time:.6f}"]
@@ -802,9 +802,9 @@ class UAV(Agent):
 
         # 2. Propagation (the ESKF propagates its own attitude, KF6 receives the true attitude)
         if self.filter_type == "eskf":
-            self.ekf.predict(imu_acc, imu_gyro, dt=imu_dt)
+            self.nav_filter.predict(imu_acc, imu_gyro, dt=imu_dt)
         else:
-            self.ekf.predict(imu_acc, self.imu.q_mid, dt=imu_dt)
+            self.nav_filter.predict(imu_acc, self.imu.q_mid, dt=imu_dt)
 
         # 3. GNSS correction; during an outage the filter continues in pure inertial mode
         self._gnss_updated = False
@@ -814,7 +814,7 @@ class UAV(Agent):
                 self.last_gnss_meas_pos = np.array(meas_pos, dtype=np.float32)
                 self.last_gnss_meas_vel = np.array(meas_vel, dtype=np.float32)
                 # Accuracy reported by the receiver (jamming included)
-                self.ekf.update(
+                self.nav_filter.update(
                     meas_pos, meas_vel, pos_std=self.gnss.last_pos_std, vel_std=self.gnss.last_vel_std
                 )
                 self._gnss_updated = True
@@ -828,12 +828,12 @@ class UAV(Agent):
             self.next_gnss_trigger = self.last_gnss_nominal_time + jitter
 
         # 4. Published estimated state (used by control and navigation)
-        pos = np.array(self.ekf.position, dtype=float)
-        vel = np.array(self.ekf.velocity, dtype=float)
+        pos = np.array(self.nav_filter.position, dtype=float)
+        vel = np.array(self.nav_filter.velocity, dtype=float)
 
         # Attitude given to the inner loop
         if self.attitude_source == "filter":
-            orn_q = np.array(self.ekf.attitude, dtype=float)
+            orn_q = np.array(self.nav_filter.attitude, dtype=float)
         else:
             orn_q = true_orn_q
         rpy = np.array(p.getEulerFromQuaternion(orn_q))
@@ -1098,11 +1098,11 @@ class UAV(Agent):
             collision_flag = 1
 
         meas_pos = np.array(self.last_gnss_meas_pos, dtype=np.float32)
-        ekf_pos = np.array(self.ekf.x[:3], dtype=np.float32)
+        est_pos = np.array(self.nav_filter.x[:3], dtype=np.float32)
 
         # Derived metrics
         gnss_error = np.linalg.norm(np.array(meas_pos) - np.array(gt["pos"]))
-        ekf_error = np.linalg.norm(np.array(ekf_pos) - np.array(gt["pos"]))
+        est_error = np.linalg.norm(np.array(est_pos) - np.array(gt["pos"]))
         wind_mag = np.linalg.norm(self.current_wind)
         tracking_error = np.linalg.norm(np.array(gt["pos"]) - np.array(self.current_target_pos))
 
@@ -1115,8 +1115,8 @@ class UAV(Agent):
                 # Sensors
                 *meas_pos,
                 gnss_error,
-                *ekf_pos,
-                ekf_error,
+                *est_pos,
+                est_error,
                 # Environment
                 *self.current_wind,
                 wind_mag,

@@ -49,9 +49,9 @@ def plot_log(path):
         "x_gps": "meas_x",
         "y_gps": "meas_y",
         "z_gps": "meas_z",
-        "x_ekf": "ekf_x",
-        "y_ekf": "ekf_y",
-        "z_ekf": "ekf_z",
+        "x_est": "est_x",
+        "y_est": "est_y",
+        "z_est": "est_z",
     }
     for old, new in alias.items():
         if old not in data and new in data:
@@ -70,9 +70,9 @@ def plot_log(path):
     z_gps = data.get("z_gps", np.full_like(t, np.nan))
 
     # Filter estimate (may be NaN if disabled)
-    x_ekf = data.get("x_ekf", np.full_like(t, np.nan))
-    y_ekf = data.get("y_ekf", np.full_like(t, np.nan))
-    z_ekf = data.get("z_ekf", np.full_like(t, np.nan))
+    x_est = data.get("x_est", np.full_like(t, np.nan))
+    y_est = data.get("y_est", np.full_like(t, np.nan))
+    z_est = data.get("z_est", np.full_like(t, np.nan))
 
     # ---------------- XY trajectory ----------------
     plt.figure(figsize=(6, 6))
@@ -80,8 +80,8 @@ def plot_log(path):
 
     if np.isfinite(x_gps).any():
         plt.scatter(x_gps, y_gps, s=4, alpha=0.5, label="GPS", marker="x")
-    if np.isfinite(x_ekf).any():
-        plt.plot(x_ekf, y_ekf, linestyle="--", label="EKF")
+    if np.isfinite(x_est).any():
+        plt.plot(x_est, y_est, linestyle="--", label="Filtre")
 
     plt.xlabel("x [m]")
     plt.ylabel("y [m]")
@@ -102,20 +102,20 @@ def plot_log(path):
         err_gps[mask_gps] = err_norm[mask_gps]
 
     # Filter error
-    err_ekf = np.full_like(t, np.nan)
-    if np.isfinite(x_ekf).any():
-        mask_ekf = np.isfinite(x_ekf) & np.isfinite(x_true)
-        dx = x_ekf - x_true
-        dy = y_ekf - y_true
-        dz = z_ekf - z_true
+    err_est = np.full_like(t, np.nan)
+    if np.isfinite(x_est).any():
+        mask_est = np.isfinite(x_est) & np.isfinite(x_true)
+        dx = x_est - x_true
+        dy = y_est - y_true
+        dz = z_est - z_true
         err_norm = np.sqrt(dx**2 + dy**2 + dz**2)
-        err_ekf[mask_ekf] = err_norm[mask_ekf]
+        err_est[mask_est] = err_norm[mask_est]
 
     plt.figure(figsize=(8, 4))
     if np.isfinite(err_gps).any():
         plt.plot(t, err_gps, label="Erreur GPS", linewidth=1.5)
-    if np.isfinite(err_ekf).any():
-        plt.plot(t, err_ekf, label="Erreur EKF", linewidth=1.5)
+    if np.isfinite(err_est).any():
+        plt.plot(t, err_est, label="Erreur filtre", linewidth=1.5)
 
     plt.xlabel("Temps [s]")
     plt.ylabel("||erreur position|| [m]")

@@ -145,7 +145,7 @@ main.py                  entry point: python main.py [config.yaml]
 config.yaml              scenario: world, swarm, drones, sensors, wind
 simulator/               SimulationManager: PyBullet setup and main loop
 entities/                UAV (control, planning, logging), GNSS/IMU sensors, radar
-Control/                 ESKF (15 states), 6-state filter, A* planner
+Control/                 ESKF (15 states), 6-state linear Kalman filter (kf6), A* planner
 swarm/                   leader-follower formation coordinator (ZMQ)
 environment/             generated city, wind model
 utilities/               quaternions, buffered CSV logging, config loading
