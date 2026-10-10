@@ -3,7 +3,7 @@ name = "causal-inference-sim"
 version = "1.0.0"
 description = "Quadrotor swarm simulation (PyBullet) with GNSS/INS navigation filters and causal analysis of failures"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.13"  # no prebuilt pybullet wheel for 3.13
 
 [tool.ruff]
 line-length = 110

@@ -1,5 +1,4 @@
 import os
-import csv
 import threading
 import pybullet as p
 import numpy as np
@@ -266,42 +265,38 @@ class UAV(Agent):
         log_dir = self.config.get("log_dir", "logs")
         self.log_file = os.path.join(log_dir, f"{self.name}.csv")
         os.makedirs(log_dir, exist_ok=True)
-        if os.path.exists(self.log_file):
-            os.remove(self.log_file)
-
         # Complete header for causal analysis
-        with open(self.log_file, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(
-                [
-                    "time",
-                    "gt_x",
-                    "gt_y",
-                    "gt_z",  # Ground Truth
-                    "gt_vx",
-                    "gt_vy",
-                    "gt_vz",
-                    "meas_x",
-                    "meas_y",
-                    "meas_z",  # Sensors
-                    "gnss_error_mag",
-                    "est_x",
-                    "est_y",
-                    "est_z",
-                    "est_pos_error_mag",
-                    "wind_x",
-                    "wind_y",
-                    "wind_z",  # Environment
-                    "wind_mag",
-                    "rep_force_mag",  # Interaction
-                    "nearest_neighbor_dist",
-                    "target_x",
-                    "target_y",
-                    "target_z",  # Intent
-                    "tracking_error_mag",
-                    "collision_flag",  # Flags
-                ]
-            )
+        self.main_log = CsvBuffer(
+            self.log_file,
+            [
+                "time",
+                "gt_x",
+                "gt_y",
+                "gt_z",  # Ground Truth
+                "gt_vx",
+                "gt_vy",
+                "gt_vz",
+                "meas_x",
+                "meas_y",
+                "meas_z",  # Sensors
+                "gnss_error_mag",
+                "est_x",
+                "est_y",
+                "est_z",
+                "est_pos_error_mag",
+                "wind_x",
+                "wind_y",
+                "wind_z",  # Environment
+                "wind_mag",
+                "rep_force_mag",  # Interaction
+                "nearest_neighbor_dist",
+                "target_x",
+                "target_y",
+                "target_z",  # Intent
+                "tracking_error_mag",
+                "collision_flag",  # Flags
+            ],
+        )
 
         # Filter validation log (error = estimated - true)
         xyz = ("x", "y", "z")
@@ -404,7 +399,8 @@ class UAV(Agent):
 
     def close_logs(self):
         """Write the rows still in memory. Called by SimulationManager.stop()."""
-        for buf in (getattr(self, "filter_log", None), getattr(self, "truth_log", None)):
+        for name in ("main_log", "filter_log", "truth_log"):
+            buf = getattr(self, name, None)
             if buf is not None:
                 buf.close()
 
@@ -628,10 +624,6 @@ class UAV(Agent):
         self.sub_socket.connect(f"tcp://{ip}:{port_sub_swarm}")
         self.sub_socket.setsockopt_string(zmq.SUBSCRIBE, "")
         self.sub_socket.setsockopt(zmq.RCVTIMEO, 1)
-        try:
-            self.sub_socket.setsockopt(zmq.CONFLATE, 1)
-        except zmq.Error:
-            pass
 
         self.pub_socket = self.zmq_ctx.socket(zmq.PUB)
         self.pub_socket.connect(f"tcp://{ip}:{port_pub_swarm}")
@@ -1115,28 +1107,27 @@ class UAV(Agent):
         wind_mag = np.linalg.norm(self.current_wind)
         tracking_error = np.linalg.norm(np.array(gt["pos"]) - np.array(self.current_target_pos))
 
-        with open(self.log_file, "a", newline="") as f:
-            row = [
-                round(self._sim_time, 3),
-                # Ground Truth
-                *gt["pos"],
-                *gt["vel"],
-                # Sensors
-                *meas_pos,
-                gnss_error,
-                *est_pos,
-                est_error,
-                # Environment
-                *self.current_wind,
-                wind_mag,
-                # Interaction
-                round(self.last_repulsive_force_mag, 3),
-                round(self.dist_to_nearest_neighbor, 3),
-                # Intent
-                *self.current_target_pos,
-                tracking_error,
-                collision_flag,
-            ]
-            # Clean float formatting
-            row = [x if isinstance(x, (int, str)) else round(float(x), 4) for x in row]
-            csv.writer(f).writerow(row)
+        row = [
+            round(self._sim_time, 3),
+            # Ground Truth
+            *gt["pos"],
+            *gt["vel"],
+            # Sensors
+            *meas_pos,
+            gnss_error,
+            *est_pos,
+            est_error,
+            # Environment
+            *self.current_wind,
+            wind_mag,
+            # Interaction
+            round(self.last_repulsive_force_mag, 3),
+            round(self.dist_to_nearest_neighbor, 3),
+            # Intent
+            *self.current_target_pos,
+            tracking_error,
+            collision_flag,
+        ]
+        # Clean float formatting
+        row = [x if isinstance(x, (int, str)) else round(float(x), 4) for x in row]
+        self.main_log.write(row)

@@ -13,7 +13,10 @@ import pytest
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(_ROOT, "analysis"))
 
-torch = pytest.importorskip("torch")
+if os.environ.get("REQUIRE_TORCH"):
+    import torch  # noqa: F401  (CI: fail instead of silently skipping)
+else:
+    torch = pytest.importorskip("torch")
 import causal_analysis as ca  # noqa: E402
 import causal_validation as cv  # noqa: E402
 
