@@ -45,7 +45,7 @@ REM ---------- 3. pip packages ----------
 echo [3/4] Installation de pathfinding, gym-pybullet-drones et des outils d'analyse...
 "%ENV%\python.exe" -m pip install --upgrade pathfinding
 if errorlevel 1 goto :fail
-"%ENV%\python.exe" -m pip install --no-deps https://github.com/utiasDSL/gym-pybullet-drones/archive/refs/heads/main.zip
+"%ENV%\python.exe" -m pip install --no-deps https://github.com/utiasDSL/gym-pybullet-drones/archive/7ebad1ecabd28a7000add2d05f888aa2e837c2cc.zip
 if errorlevel 1 goto :fail
 echo      Bibliotheques de l'analyse causale et des tests (torch, statsmodels...)
 "%ENV%\python.exe" -m pip install torch networkx statsmodels scikit-learn pytest

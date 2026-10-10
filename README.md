@@ -180,7 +180,7 @@ simulation. Helper scripts: `scripts\windows\lancer_tests.bat`,
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-pip install --no-deps https://github.com/utiasDSL/gym-pybullet-drones/archive/refs/heads/main.zip
+pip install --no-deps https://github.com/utiasDSL/gym-pybullet-drones/archive/7ebad1ecabd28a7000add2d05f888aa2e837c2cc.zip
 ```
 
 **Run:**
