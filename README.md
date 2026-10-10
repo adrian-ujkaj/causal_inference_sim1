@@ -16,6 +16,76 @@ validation, causal verification). See [who did what](#who-did-what).
 Published with the agreement of the KAIST AIS Lab, Prof. Hyo-Sang Shin and the
 supervising professors at ISAE-Supméca.
 
+![Simulation: leader and two followers in V formation flying through the generated city](docs/images/demo.gif)
+
+*Default scenario, played at 2× speed: the leader (red) plans its route through the
+streets, the two followers (blue) hold a V formation behind it, the independent
+drone (green) climbs on its own. In the turns the V rotates with the leader's heading
+and briefly deforms: these are the formation losses the causal analysis attributes to
+the leader's manoeuvres. Rings, labels, trails and the white formation links are drawn
+over the PyBullet render.*
+
+## Architecture
+
+```mermaid
+flowchart LR
+    cfg[config.yaml] --> sim[SimulationManager<br/>PyBullet]
+    sim --> world[World<br/>generated city]
+    sim --> swarm[Swarm coordinator<br/>leader-follower]
+    sim --> uav[UAV x4]
+    sim --> radar[Radar station]
+    swarm <-- "ZMQ messages" --> uav
+    radar -. "ZMQ tracks" .-> uav
+    subgraph uav_loop [UAV control loop]
+        sens[GNSS + IMU<br/>noise, biases, jamming] --> eskf[ESKF 15 states]
+        eskf --> ctrl[A* planner + PID<br/>gym-pybullet-drones]
+    end
+    uav --> uav_loop
+    wind[Dryden wind] --> uav
+    uav --> logs[(CSV logs<br/>truth, estimate, sensors)]
+    logs --> fv[filter_validation<br/>RMSE, NEES, NIS]
+    logs --> ca[causal_analysis<br/>NRI, event models, Granger]
+    ca --> cv[causal_validation<br/>paired interventions]
+```
+
+## The simulator
+
+- **World**: a city generated at start-up as a URDF, 4 × 4 blocks of 20 m separated
+  by 10 m streets, 9 buildings per block, 30–50 m tall (`environment/world.py`).
+- **Quadrotors**: Crazyflie-sized (27 g). Rotor thrust, torques and aerodynamic drag
+  are applied in PyBullet at 240 Hz; the gym-pybullet-drones PID flies them at 80 Hz,
+  with thrust and tilt limits, stricter near the ground (`entities/uav.py`).
+- **Path planning**: buildings are rasterised into a heightmap (0.25 m cells, inflated
+  by a 0.25 m safety margin); A* searches it at the lowest altitude of the leg
+  without cutting corners, then the path is smoothed by line of sight. Planning runs
+  in a background thread; repulsive forces keep drones away from walls, roofs and
+  each other (`Control/Path_planning.py`, `entities/uav.py`).
+- **Swarm**: leader–follower. The leader flies its waypoints; the followers hold
+  V-formation slots in the leader's frame (1 m back and 1 m aside per rank). The
+  formation turns with the leader's heading (at most 2 rad/s), and targets are
+  pushed apart to keep 0.6 m between drones (`swarm/swarm.py`). drone_3 is outside
+  the swarm and flies its own mission.
+- **Sensors and navigation**: GNSS at 10 Hz with noise, jamming and outages; MEMS
+  IMU with biases, scale factor and random walk; each drone navigates on its own
+  filter estimate (`entities/sensor.py`, `Control/ESKF.py`).
+- **Wind**: Dryden turbulence per drone, with optional bursts (`environment/wind.py`).
+- **Logs**: one CSV per drone with truth, estimate, sensors, wind and interactions,
+  the input of the analyses.
+
+### Communication between agents
+
+Agents only exchange information through [ZeroMQ](https://zeromq.org/)
+publish/subscribe messages (`TOPIC {json}` over TCP), relayed by a proxy run by the
+swarm coordinator. Each message is delivered with a simulated delay of about
+100 ms, and receivers extrapolate positions by the age of the message.
+
+| Message | From → to | Rate | Purpose |
+|---|---|---|---|
+| `State` | each swarm drone → coordinator | 10 Hz | estimated position, velocity and heading |
+| `FUTURE_POS` | coordinator → followers | 50 Hz | each follower's formation target |
+| `SWARM` | coordinator → drones | 50 Hz | neighbours' positions, for avoidance |
+| `RADAR` | radar station → drones | 1 Hz | noisy tracks of drones within 30 m, including drones outside the swarm |
+
 ## Key results
 
 | | |
@@ -57,26 +127,6 @@ losses, 57 % of its formation losses); drones without failure onsets are not lis
 
 Details, limits and reliability assessment:
 [docs/navigation.md](docs/navigation.md) · [docs/causal_analysis.md](docs/causal_analysis.md)
-
-## Architecture
-
-```mermaid
-flowchart LR
-    cfg[config.yaml] --> sim[SimulationManager<br/>PyBullet]
-    sim --> world[World<br/>generated city]
-    sim --> swarm[Swarm coordinator<br/>leader-follower, ZMQ]
-    sim --> uav[UAV x4]
-    subgraph uav_loop [UAV control loop]
-        sens[GNSS + IMU<br/>noise, biases, jamming] --> eskf[ESKF 15 states]
-        eskf --> ctrl[A* planner + PID<br/>gym-pybullet-drones]
-    end
-    uav --> uav_loop
-    wind[Dryden wind] --> uav
-    uav --> logs[(CSV logs<br/>truth, estimate, sensors)]
-    logs --> fv[filter_validation<br/>RMSE, NEES, NIS]
-    logs --> ca[causal_analysis<br/>NRI, event models, Granger]
-    ca --> cv[causal_validation<br/>paired interventions]
-```
 
 ## Who did what
 
