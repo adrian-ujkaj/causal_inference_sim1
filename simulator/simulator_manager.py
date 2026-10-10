@@ -12,6 +12,20 @@ from entities.static_sensor import RadarStation
 from Control.Path_planning import HeightmapAStar
 
 
+def _seed_agent(agent_cfg: dict, stream: np.random.SeedSequence) -> None:
+    """Give a drone its own generators (IMU, GNSS noise, GNSS schedule, wind, messages),
+    derived from simulation.seed: two runs with the same seed draw the same sensor noise
+    whatever the timing of the ZMQ messages. Seeds already in the config are kept."""
+    imu_s, gnss_s, sched_s, wind_s, comm_s = (int(x) for x in stream.generate_state(5))
+    sensors = agent_cfg.setdefault("sensors", {})
+    sensors.setdefault("imu", {}).setdefault("seed", imu_s)
+    sensors.setdefault("gnss", {}).setdefault("seed", gnss_s)
+    if isinstance(agent_cfg.get("wind", {}), dict):
+        agent_cfg.setdefault("wind", {}).setdefault("seed", wind_s)
+    agent_cfg.setdefault("gnss_schedule_seed", sched_s)
+    agent_cfg.setdefault("comm_seed", comm_s)
+
+
 class SimulationManager:
     """PyBullet connection, world, drones, radars and swarms, then the simulation loop."""
 
@@ -25,10 +39,11 @@ class SimulationManager:
         if simulation_seed is not None:
             try:
                 simulation_seed = int(simulation_seed)
-                random.seed(simulation_seed)
-                np.random.seed(simulation_seed)
-            except Exception:
-                pass
+            except (TypeError, ValueError):
+                raise ValueError(f"simulation.seed doit etre un entier, recu {simulation_seed!r}") from None
+            random.seed(simulation_seed)
+            np.random.seed(simulation_seed)
+        self.seed = simulation_seed
         # 1. PyBullet connection
         mode_str = str(self.config["simulation"]["connect_mode"]).strip().lower()
         self.realtime = bool(self.config.get("simulation", {}).get("realtime", mode_str == "gui"))
@@ -121,6 +136,15 @@ class SimulationManager:
         sim_log_dir = None
         if isinstance(self.config, dict):
             sim_log_dir = self.config.get("simulation", {}).get("log_dir", None)
+        # One independent random stream per agent, derived from simulation.seed
+        agent_cfgs = [a for a in self.config.get("agents", []) if isinstance(a, dict)]
+        streams = np.random.SeedSequence(self.seed).spawn(len(agent_cfgs) + 1)
+        for agent_cfg, stream in zip(agent_cfgs, streams):
+            if agent_cfg.get("type") == "uav":
+                _seed_agent(agent_cfg, stream)
+            elif agent_cfg.get("type") == "radar":
+                agent_cfg.setdefault("seed", int(stream.generate_state(1)[0]))
+        self._swarm_seeds = streams[-1]
         for agent_cfg in self.config.get("agents", []):
             # Propagate global log directory to each UAV config (if provided)
             if sim_log_dir and isinstance(agent_cfg, dict) and agent_cfg.get("type") == "uav":
@@ -227,6 +251,7 @@ class SimulationManager:
             print("[Swarm] Aucun 'swarm_id' trouvé sur les drones.")
             return
 
+        swarm_streams = dict(zip(swarms_groups, self._swarm_seeds.spawn(len(swarms_groups))))
         for s_id, members in swarms_groups.items():
             if len(members) < 2:
                 print(f"[Swarm] Groupe '{s_id}' : Trop petit (<2). Ignoré.")
@@ -257,6 +282,7 @@ class SimulationManager:
                 port_in=port_in,
                 port_out=port_out,
                 ip=ip,
+                rng_seed=int(swarm_streams[s_id].generate_state(1)[0]),
             )
             self.swarms.append(new_swarm)
 

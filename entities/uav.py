@@ -5,7 +5,6 @@ import pybullet as p
 import numpy as np
 import zmq
 import json
-import random
 
 # Utility Imports & Control
 from entities.agent import Agent
@@ -190,6 +189,11 @@ class UAV(Agent):
         self.message_buffer = []
         self.perception_delay_mean = com.get("com_delay_mean", 0.1)  # 100ms delay
         self.perception_delay_std = com.get("com_delay_std", 0.02)  # +/- 20ms
+        # Own generators (seeded by SimulationManager), never the global `random` module:
+        # the number of messages read per step depends on ZMQ timing, so a shared stream
+        # would desynchronise everything else between two runs with the same seed
+        self._comm_rng = np.random.default_rng(self.config.get("comm_seed"))
+        self._gnss_schedule_rng = np.random.default_rng(self.config.get("gnss_schedule_seed"))
 
         # --- SENSORS ---
         sens = self.config.get("sensors", {})
@@ -222,8 +226,11 @@ class UAV(Agent):
         self.gnss_freq = sens.get("gnss", {}).get("frequency", 10.0)  # 10 Hz
         self.gnss_dt = 1.0 / self.gnss_freq
         self.last_gnss_update_time = -self.gnss_dt
-        self.gnss_delay_mean = sens.get("gnss", {}).get("delay_mean", 0.1)
-        self.gnss_delay_std = sens.get("gnss", {}).get("delay_std", 0.01)
+        # Jitter of the GNSS sampling time: it shifts when a fix is taken, and the fix is
+        # used at once (no latency model). delay_mean / delay_std are the former names.
+        gnss_cfg = sens.get("gnss", {})
+        self.gnss_jitter_mean = gnss_cfg.get("jitter_mean", gnss_cfg.get("delay_mean", 0.1))
+        self.gnss_jitter_std = gnss_cfg.get("jitter_std", gnss_cfg.get("delay_std", 0.01))
         self.next_gnss_trigger = 0.0
 
         # GNSS schedule and last measurement received
@@ -244,7 +251,9 @@ class UAV(Agent):
                 float(wind_cfg.get("burst_end", float("inf"))),
                 float(wind_cfg["burst_turbulence"]),
             )
-        self.wind_module = DrydenGustModel(self.dt, self.turbulence, self.mean_wind, burst=burst)
+        self.wind_module = DrydenGustModel(
+            self.dt, self.turbulence, self.mean_wind, seed=wind_cfg.get("seed"), burst=burst
+        )
 
         # radar
         radar_list = self.config.get("radar", None)
@@ -672,7 +681,7 @@ class UAV(Agent):
             try:
                 # Non-blocking read
                 msg = self.radar_sub_socket.recv_string()
-                delay = max(0, random.gauss(self.perception_delay_mean, self.perception_delay_std))
+                delay = max(0.0, self._comm_rng.normal(self.perception_delay_mean, self.perception_delay_std))
                 visible_time = self._sim_time + delay
                 self.radar_message_buffer.append((visible_time, msg))
             except zmq.Again:
@@ -717,7 +726,7 @@ class UAV(Agent):
             try:
                 # Non-blocking read
                 msg = self.sub_socket.recv_string()
-                delay = max(0, random.gauss(self.perception_delay_mean, self.perception_delay_std))
+                delay = max(0.0, self._comm_rng.normal(self.perception_delay_mean, self.perception_delay_std))
                 visible_time = self._sim_time + delay
                 self.message_buffer.append((visible_time, msg))
             except zmq.Again:
@@ -823,7 +832,7 @@ class UAV(Agent):
                 )
 
             # Next measurement: periodic schedule + jitter, without accumulation
-            jitter = max(0.0, random.gauss(self.gnss_delay_mean, self.gnss_delay_std))
+            jitter = max(0.0, self._gnss_schedule_rng.normal(self.gnss_jitter_mean, self.gnss_jitter_std))
             self.last_gnss_nominal_time += self.gnss_dt
             self.next_gnss_trigger = self.last_gnss_nominal_time + jitter
 

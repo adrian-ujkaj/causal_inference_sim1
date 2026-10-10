@@ -42,7 +42,10 @@ analysis concluded without knowing the perturbation.
 ## Verification protocol (`analysis/causal_validation.py`)
 
 Three paired campaigns of 24 flights × 30 s share the same seeds (same wind
-realisation, same sensor noise, same plan):
+realisation, same plan). In the campaigns reported here the IMU noise was drawn
+independently in each flight: the sensor seeds were not yet derived from the flight
+seed (they are now). This widens the paired differences and adds to the divergence
+before the intervention, but cannot create a spurious effect.
 
 | Campaign | Change |
 |---|---|

@@ -4,7 +4,6 @@ import pybullet as p
 from entities.uav import UAV
 import zmq
 import threading
-import random
 
 
 class Swarm:
@@ -21,6 +20,7 @@ class Swarm:
         port_in: int = 5556,
         port_out: int = 5557,
         ip: str = "localhost",
+        rng_seed: int | None = None,
     ):
         if len(agents) == 0:
             raise ValueError("Swarm nécessite au moins un agent UAV.")
@@ -36,6 +36,7 @@ class Swarm:
         # Com latency
         self.perception_delay_mean = 0.1  # 100 ms delay
         self.perception_delay_std = 0.02  # +/- 20ms
+        self._rng = np.random.default_rng(rng_seed)  # own generator, not the global `random`
         self.message_buffer = []
         agents_names = [a.name for a in agents if a.type == "uav"]
         # Leader selection
@@ -214,7 +215,7 @@ class Swarm:
             try:
                 # Non-blocking read
                 msg = self.sub_socket.recv_string()
-                delay = max(0, random.gauss(self.perception_delay_mean, self.perception_delay_std))
+                delay = max(0.0, self._rng.normal(self.perception_delay_mean, self.perception_delay_std))
                 visible_time = self.sim_time + delay
                 self.message_buffer.append((visible_time, msg))
             except zmq.Again:

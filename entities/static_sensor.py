@@ -17,6 +17,7 @@ class RadarStation(Agent):
         # Noise mean (0 by default)
         self.pos_noise_mean = float(self.config.get("position_noise_mean", 0.0))
         self.range_noise_mean = float(self.config.get("range_noise_mean", 0.0))
+        self._rng = np.random.default_rng(self.config.get("seed"))  # seeded by SimulationManager
 
         self.bodyId = self.config.get("bodyId", 1000)
 
@@ -82,8 +83,8 @@ class RadarStation(Agent):
             dist = np.linalg.norm(np.array(target_pos) - np.array(self.pos))
 
             if dist <= self.detection_range:
-                meas_dist = dist + np.random.normal(self.range_noise_mean, self.range_noise_std)
-                est_pos = np.array(target_pos) + np.random.normal(self.pos_noise_mean, self.pos_noise_std, 3)
+                meas_dist = dist + self._rng.normal(self.range_noise_mean, self.range_noise_std)
+                est_pos = np.array(target_pos) + self._rng.normal(self.pos_noise_mean, self.pos_noise_std, 3)
 
                 detected_report[agent.name] = {
                     "type": "radar",

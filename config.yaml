@@ -40,7 +40,7 @@ agents:
     ctrl_freq: 80
     communication: {com_period: 0.1, com_delay_mean: 0.1, com_delay_std: 0.01}
     sensors:
-      gnss: {enabled: true, position_noise_std: 0.1, velocity_noise_std: 0.05,frequency: 10, delay_mean: 0.1,delay_std: 0.01}
+      gnss: {enabled: true, position_noise_std: 0.1, velocity_noise_std: 0.05,frequency: 10, jitter_mean: 0.1, jitter_std: 0.01}
       imu: {enabled: true, accel_noise_std: 0.3, gyro_noise_std: 0.03, gravity: 9.81}
     wind: {wind_mean: [0,0,0], turbulence: 10}
     radar : 
@@ -63,7 +63,7 @@ agents:
     physics: {thrust_coeff: 3.16e-10, torque_coeff: 7.94e-12, max_rpm: 22000.0, motor_link_indices: [0, 1, 2, 3], max_speed: 5}
     communication: {com_period: 0.1, com_delay_mean: 0.1, com_delay_std: 0.01}
     sensors:
-      gnss: {enabled: true, position_noise_std: 0.1, velocity_noise_std: 0.05,frequency: 10, delay_mean: 0.1,delay_std: 0.01}
+      gnss: {enabled: true, position_noise_std: 0.1, velocity_noise_std: 0.05,frequency: 10, jitter_mean: 0.1, jitter_std: 0.01}
       imu: {enabled: true, accel_noise_std: 0.3, gyro_noise_std: 0.03, gravity: 9.81}
     wind: {wind_mean: [0,0,0], turbulence: 10}
     radar : 
@@ -85,7 +85,7 @@ agents:
     physics: {thrust_coeff: 3.16e-10, torque_coeff: 7.94e-12, max_rpm: 22000.0, motor_link_indices: [0, 1, 2, 3], max_speed: 5}
     communication: {com_period: 0.1, com_delay_mean: 0.1, com_delay_std: 0.01}
     sensors:
-      gnss: {enabled: true, position_noise_std: 0.1, velocity_noise_std: 0.05,frequency: 10, delay_mean: 0.1,delay_std: 0.01}
+      gnss: {enabled: true, position_noise_std: 0.1, velocity_noise_std: 0.05,frequency: 10, jitter_mean: 0.1, jitter_std: 0.01}
       imu: {enabled: true,accel_noise_mean: 0.5, accel_noise_std: 0.3, gyro_noise_std: 0.03, gravity: 9.81}
     wind: {wind_mean: [0,0,0], turbulence: 10}
     radar : 
@@ -109,7 +109,7 @@ agents:
     physics: {thrust_coeff: 3.16e-10, torque_coeff: 7.94e-12, max_rpm: 22000.0, motor_link_indices: [0, 1, 2, 3], max_speed: 5}
     communication: {com_period: 0.1, com_delay_mean: 0.1, com_delay_std: 0.01}
     sensors:
-      gnss: {enabled: true, position_noise_std: 0.1, velocity_noise_std: 0.05,frequency: 10, delay_mean: 0.1,delay_std: 0.01}
+      gnss: {enabled: true, position_noise_std: 0.1, velocity_noise_std: 0.05,frequency: 10, jitter_mean: 0.1, jitter_std: 0.01}
       imu: {enabled: true, accel_noise_std: 0.3, gyro_noise_std: 0.03, gravity: 9.81}
     wind: {wind_mean: [0,0,0], turbulence: 10}
     radar : 

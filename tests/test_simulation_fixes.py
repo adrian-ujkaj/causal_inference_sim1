@@ -169,3 +169,31 @@ def test_astar_plans_from_ground_level():
     pl.build_from_buildings([{"center": [0.0, 0.0, 10.0], "height": 10.0, "width": 2.0, "length": 2.0}])
     path = pl.plan(np.array([-4.0, -4.0, 0.0]), np.array([4.0, 4.0, 1.0]))
     assert path is not None and len(path) > 2
+
+
+# Reproducibility
+def test_agent_seeds_follow_simulation_seed():
+    """Same simulation.seed -> same sensor, wind and message streams for every drone."""
+    from simulator.simulator_manager import _seed_agent
+
+    def seeds(sim_seed):
+        cfgs = [{"type": "uav", "sensors": {"imu": {}, "gnss": {}}, "wind": {}} for _ in range(3)]
+        for cfg, stream in zip(cfgs, np.random.SeedSequence(sim_seed).spawn(3)):
+            _seed_agent(cfg, stream)
+        return [
+            (c["sensors"]["imu"]["seed"], c["sensors"]["gnss"]["seed"], c["wind"]["seed"],
+             c["gnss_schedule_seed"], c["comm_seed"])
+            for c in cfgs
+        ]
+
+    assert seeds(7) == seeds(7)
+    assert seeds(7) != seeds(8)
+    flat = [s for drone in seeds(7) for s in drone]
+    assert len(set(flat)) == len(flat)  # independent streams
+
+
+def test_invalid_seed_fails_loudly():
+    from simulator.simulator_manager import SimulationManager
+
+    with pytest.raises(ValueError):
+        SimulationManager({"simulation": {"dt": 0.00416, "seed": "12a", "connect_mode": "direct"}})
