@@ -119,3 +119,32 @@ def test_outage_drift_and_honest_uncertainty_with_realistic_mems():
                 cover.append(np.mean(e <= 3 * sg))
     assert np.median(drift["eskf"]) < 0.5 * np.median(drift["kf6"])
     assert np.mean(cover) > 0.97
+
+
+# NIS gate
+def test_gate_is_sized_by_measurement_dimension():
+    """0.1 % false alarms whatever the measurement size: chi2(3) and chi2(6) quantiles."""
+    f = ESKF(1 / 80)
+    assert abs(f.gate_threshold(6) - 22.46) < 0.01
+    assert abs(f.gate_threshold(3) - 16.27) < 0.01
+    assert ESKF(1 / 80, config={"nis_gate": 0}).gate_threshold(3) is None
+
+
+def test_gate_recovery_keeps_attitude_and_bias_covariance():
+    """After repeated rejections only position/velocity are inflated; biases keep what was learned."""
+    f = ESKF(1 / 80, gnss_config={"position_noise_std": 0.1, "velocity_noise_std": 0.05})
+    f.init_state(np.zeros(3))
+    P0 = f.P.copy()
+    f._inflate_pos_vel()
+    assert np.allclose(f.P[6:, 6:], P0[6:, 6:])
+    assert np.allclose(f.P[:6, :6], f.recovery_inflation * P0[:6, :6])
+    assert np.all(np.linalg.eigvalsh(f.P) > 0)
+
+    f = ESKF(1 / 80, gnss_config={"position_noise_std": 0.1, "velocity_noise_std": 0.05})
+    f.init_state(np.zeros(3))
+    bias_var0 = np.diag(f.P)[9:].copy()
+    far = np.array([50.0, 0.0, 0.0])
+    for _ in range(f.max_consecutive_rejected + 1):
+        f.update(far, np.zeros(3))
+    assert f.n_gate_recoveries == 1
+    assert np.all(np.diag(f.P)[9:] <= bias_var0 + 1e-12)

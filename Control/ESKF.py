@@ -6,6 +6,7 @@ Body -> world q stored as [x, y, z, w] (Sola: [w, x, y, z]), q_true = q (x) Exp(
 from __future__ import annotations
 
 import numpy as np
+from scipy.stats import chi2
 
 from utilities import quaternion as Q
 
@@ -81,8 +82,18 @@ class ESKF:
         self.sigma_v = float(gnss.get("velocity_noise_std", 0.05)) or 0.05
         self.R = np.diag([self.sigma_p**2] * 3 + [self.sigma_v**2] * 3)
 
-        self.nis_gate = cfg.get("nis_gate", 22.46)  # chi2(6), p = 0.001
+        # NIS gate: false-alarm probability per update, sized by the measurement dimension
+        # (16.27 for position only, 22.46 for position + velocity at 0.1 %). A legacy
+        # `nis_gate` value is read as a chi2(6) threshold; 0 or None disables the gate.
+        if "nis_gate" in cfg:
+            legacy = cfg["nis_gate"]
+            self.gate_prob = float(chi2.sf(float(legacy), 6)) if legacy else 0.0
+        else:
+            self.gate_prob = float(cfg.get("nis_gate_prob", 1e-3))
+        self.nis_gate = self.gate_threshold(6)
         self.max_consecutive_rejected = int(cfg.get("max_consecutive_rejected", 5))
+        # After too many rejections, only the position/velocity covariance is inflated
+        self.recovery_inflation = float(cfg.get("recovery_inflation", 10.0))
         self.n_consecutive_rejected = 0
 
         self.last_innovation = np.zeros(6)
@@ -92,6 +103,17 @@ class ESKF:
         self.n_rejected = 0
         self.n_gate_recoveries = 0
         self.last_acc_world = np.zeros(3)
+
+    def gate_threshold(self, dim: int) -> float | None:
+        """Chi-square quantile for a `dim`-dimensional innovation (None: gating off)."""
+        return float(chi2.ppf(1.0 - self.gate_prob, dim)) if self.gate_prob > 0 else None
+
+    def _inflate_pos_vel(self) -> None:
+        """P <- D P D with D = diag(sqrt(k) I6, I9): attitude and bias blocks are kept,
+        and the congruence keeps P positive semi-definite."""
+        d = np.ones(self.STATE_DIM)
+        d[_P] = d[_V] = np.sqrt(self.recovery_inflation)
+        self.P = d[:, None] * self.P * d[None, :]
 
     # Common interface with INSGNSSFilter
     @property
@@ -220,17 +242,18 @@ class ESKF:
         self.last_nis = nis
         self.n_updates += 1
 
-        gate = self.nis_gate
-        if gate and m != 6:
-            gate = float(gate) * m / 6.0  # coarse threshold adjustment
-        if gate and nis > float(gate):
+        gate = self.gate_threshold(m)
+        if gate is not None and nis > gate:
             self.n_consecutive_rejected += 1
             if self.n_consecutive_rejected <= self.max_consecutive_rejected:
                 self.n_rejected += 1
                 return self.p.copy(), self.v.copy()
-            # Too many rejections in a row: the filter is wrong, not the measurement
+            # Too many rejections in a row: assume the filter is wrong, not the measurement.
+            # Only position/velocity are inflated, so attitude and bias estimates are kept.
+            # A persistent GNSS jump (spoofing) is accepted after this delay: detecting
+            # it needs a separate integrity monitor.
             self.n_gate_recoveries += 1
-            self.P = self.P * 10.0
+            self._inflate_pos_vel()
             S = H @ self.P @ H.T + R
             S = 0.5 * (S + S.T)
             K = np.linalg.solve(S, H @ self.P).T
